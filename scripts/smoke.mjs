@@ -248,6 +248,19 @@ async function main() {
     JSON.stringify(survivors),
   );
 
+  // The manual inbound ingest endpoint is the second write path into the funnel,
+  // and it used to accept every request whenever no secret was configured. With
+  // a secret present, an unkeyed forged "replied" event must be refused.
+  const ingestNoSecret = await post(
+    "/api/replies/ingest",
+    JSON.stringify({ from: "attacker@example.test", bodyText: "sounds great", eventType: "replied" }),
+  );
+  check(
+    "manual inbound ingest without the secret is refused",
+    ingestNoSecret.status === 401,
+    String(ingestNoSecret.status),
+  );
+
   // ── One-click unsubscribe (RFC 8058) ───────────────────────────────────────
   const oneClick = await fetch(`${BASE}/api/replies/unsubscribe?ref=does_not_exist`, {
     method: "POST",

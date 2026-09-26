@@ -182,9 +182,17 @@ app.get("/api/auth/oauth/callback", oauthLimiter, async (req, res) => {
 
 // ── Billing webhook (verified) + mock completion ───────────────────────────────
 app.post("/api/billing/webhook", async (req: Request, res) => {
+  // Fail closed. The guard below only verified a signature when a secret
+  // existed, so an unset PLATEGA_SECRET turned this into an unauthenticated
+  // "someone paid" endpoint that grants entitlements to whoever asks. Mock
+  // checkouts complete through the separate token route below, so demo mode is
+  // deliberately unaffected by this.
+  if (!env.plategaSecret) {
+    return res.status(503).json({ error: "PLATEGA_SECRET not set" });
+  }
   const raw = (req as Request & { rawBody?: string }).rawBody ?? JSON.stringify(req.body ?? {});
   const signature = req.header("Platega-Signature") ?? req.header("signature");
-  if (env.plategaSecret && !verifyPlategaSignature(raw, signature)) {
+  if (!verifyPlategaSignature(raw, signature)) {
     return res.status(401).json({ error: "invalid signature" });
   }
   try {
@@ -207,8 +215,16 @@ app.get("/api/billing/mock/complete", async (req, res) => {
 const replyLimiter = expressRateLimiter("reply", { windowMs: 60_000, max: 120 });
 
 app.post("/api/replies/ingest", replyLimiter, async (req, res) => {
+  // Fail closed, which is also what .env.example already promises this endpoint
+  // does ("Shared secret required on the inbound-reply webhook. Unset =>
+  // webhook 503."). The previous `if (env.replyIngestSecret && …)` shape
+  // accepted every request at exactly the moment no secret was configured,
+  // making it a second unauthenticated write path into the funnel.
+  if (!env.replyIngestSecret) {
+    return res.status(503).json({ error: "REPLY_INGEST_SECRET not set" });
+  }
   const secret = req.header("x-reply-secret") ?? String(req.query.secret ?? "");
-  if (env.replyIngestSecret && secret !== env.replyIngestSecret) {
+  if (!secret || secret !== env.replyIngestSecret) {
     return res.status(401).json({ error: "unauthorized" });
   }
   try {
