@@ -22,16 +22,23 @@ import { handleCalendlyEvent, handleStripeEvent, applyStripeValue, recordCtaClic
 
 const databaseConfigured = Boolean(process.env.DATABASE_URL);
 
+// Deliberately NOT keyed on process.env.CI. The workflow runs two jobs with
+// opposite contracts: `checks` has no database by design and must skip cleanly,
+// while `integration` exists only to exercise a real database. Gating on CI made
+// the first real run fail in `checks` — see run #1, which cited this line.
+// So the requirement is declared explicitly by whichever job owns it.
+const databaseRequired = Boolean(process.env.REQUIRE_INTEGRATION_TESTS);
+
 if (!databaseConfigured) {
-  if (process.env.CI) {
-    // Fail loudly rather than exiting 0 from a skip. A green CI job that silently
+  if (databaseRequired) {
+    // Fail loudly rather than exiting 0 from a skip. A green job that silently
     // omitted the only database-backed tests would *claim* the autonomous loop was
     // verified when nothing ran — strictly worse than a red one, and the exact
     // failure mode this suite exists to close.
     throw new Error(
-      "CI must provide DATABASE_URL for server/integration.test.ts to run. " +
-        "Refusing to report success from a skipped integration suite — check the " +
-        "env block of the integration job in .github/workflows/ci.yml.",
+      "REQUIRE_INTEGRATION_TESTS is set but DATABASE_URL is not. Refusing to report " +
+        "success from a skipped integration suite — check the env block of the " +
+        "integration job in .github/workflows/ci.yml.",
     );
   }
   console.warn(

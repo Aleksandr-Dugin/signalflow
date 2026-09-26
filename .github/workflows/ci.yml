@@ -32,8 +32,11 @@ jobs:
       - name: Typecheck
         run: pnpm check
 
-      # DATABASE_URL is deliberately absent: the integration suite skips itself and
-      # the rest must still pass, which is what keeps `pnpm test` usable offline.
+      # DATABASE_URL is deliberately absent here, and REQUIRE_INTEGRATION_TESTS is
+      # deliberately not set: the integration suite must skip cleanly in this job so
+      # `pnpm test` stays usable offline. Only the `integration` job declares the
+      # database contract. Run #1 failed here because the guard keyed on CI, which
+      # both jobs share, rather than on this per-job flag.
       - name: Unit tests
         run: pnpm test
 
@@ -75,6 +78,10 @@ jobs:
       # instead of skipped.
       CALENDLY_URL: https://calendly.com/acme-test/30min
       STRIPE_PAYMENT_LINK: https://buy.stripe.com/test_ci_placeholder
+      # This job owns the database contract. If DATABASE_URL ever stops reaching the
+      # tests (renamed var, dead service container), fail loudly rather than going
+      # green off 8 silent skips.
+      REQUIRE_INTEGRATION_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
 
