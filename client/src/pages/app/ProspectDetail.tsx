@@ -1,13 +1,93 @@
 import { useEffect, useState } from "react";
 import { Link } from "wouter";
 import { toast } from "sonner";
-import { Sparkles, Send, ArrowLeft, ExternalLink } from "lucide-react";
+import { Sparkles, Send, ArrowLeft, ExternalLink, Mail } from "lucide-react";
 import { trpc } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input, Textarea, Label } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader, Spinner, EmptyState, OriginBadge, ScorePill } from "@/components/common";
+
+function ContactCard({
+  prospectId,
+  contact,
+}: {
+  prospectId: string;
+  contact?: { name: string; title?: string | null; email: string; verified: boolean } | null;
+}) {
+  const utils = trpc.useUtils();
+  const [editing, setEditing] = useState(!contact);
+  const [name, setName] = useState(contact?.name ?? "");
+  const [title, setTitle] = useState(contact?.title ?? "");
+  const [email, setEmail] = useState(contact?.email ?? "");
+
+  useEffect(() => {
+    setName(contact?.name ?? "");
+    setTitle(contact?.title ?? "");
+    setEmail(contact?.email ?? "");
+    setEditing(!contact);
+  }, [contact]);
+
+  const save = trpc.contact.upsert.useMutation({
+    onSuccess: (c) => {
+      toast.success(c.verified ? "Contact saved · domain verified" : "Contact saved · domain not verified");
+      setEditing(false);
+      void utils.prospect.detail.invalidate();
+      void utils.opportunity.list.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
+  if (!editing && contact) {
+    return (
+      <Card>
+        <CardContent className="p-6">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="font-semibold">Contact</h3>
+            <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>Edit</Button>
+          </div>
+          <div className="text-sm">{contact.name}{contact.title ? ` — ${contact.title}` : ""}</div>
+          <div className="text-sm text-muted-foreground">{contact.email || "No email"}</div>
+          <Badge variant={contact.verified ? "success" : "muted"} className="mt-2">{contact.verified ? "verified" : "unverified"}</Badge>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <CardContent className="space-y-3 p-6">
+        <h3 className="font-semibold">{contact ? "Edit contact" : "Add contact"}</h3>
+        <p className="text-xs text-muted-foreground">
+          Live discovery finds companies, not people yet — add the decision-maker's email to unlock outreach.
+        </p>
+        <div className="space-y-1.5">
+          <Label htmlFor="c-name">Name</Label>
+          <Input id="c-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ada Lovelace" />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="c-title">Title (optional)</Label>
+          <Input id="c-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Head of Sales" />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="c-email">Email</Label>
+          <Input id="c-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="ada@company.com" />
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            className="flex-1"
+            onClick={() => save.mutate({ prospectId, name: name.trim(), title: title.trim() || undefined, email: email.trim() })}
+            disabled={!name.trim() || !email.trim() || save.isPending}
+          >
+            {save.isPending ? <Spinner /> : <Mail className="h-4 w-4" />} Save contact
+          </Button>
+          {contact ? <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>Cancel</Button> : null}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function ProspectDetail({ id }: { id: string }) {
   const utils = trpc.useUtils();
@@ -93,20 +173,7 @@ export default function ProspectDetail({ id }: { id: string }) {
             </CardContent>
           </Card>
 
-          {p.contact ? (
-            <Card>
-              <CardContent className="p-6">
-                <h3 className="mb-2 font-semibold">Contact</h3>
-                <div className="text-sm">{p.contact.name}{p.contact.title ? ` — ${p.contact.title}` : ""}</div>
-                <div className="text-sm text-muted-foreground">{p.contact.email || "No email"}</div>
-                <Badge variant={p.contact.verified ? "success" : "muted"} className="mt-2">{p.contact.verified ? "verified" : "unverified"}</Badge>
-              </CardContent>
-            </Card>
-          ) : (
-            <Card>
-              <CardContent className="p-6 text-sm text-muted-foreground">No contact email — outreach unavailable.</CardContent>
-            </Card>
-          )}
+          <ContactCard prospectId={id} contact={p.contact ?? null} />
 
           {p.signals.length > 0 && (
             <Card>

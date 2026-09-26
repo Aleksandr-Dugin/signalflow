@@ -18,6 +18,8 @@ import {
   getProfile,
   getProspectDetail,
   getProspectThread,
+  listContacts,
+  upsertManualContact,
   isAutopilotEnabled,
   listCampaigns,
   listOpportunities,
@@ -236,6 +238,33 @@ export const appRouter = router({
       .query(async ({ ctx, input }) => {
         const workspaceId = await requireWorkspace(ctx);
         return getProspectThread(workspaceId, input.prospectId, input.limit ?? 20);
+      }),
+  }),
+
+  contact: router({
+    list: protectedProcedure
+      .input(z.object({ prospectId: z.string() }))
+      .query(async ({ ctx, input }) => {
+        const workspaceId = await requireWorkspace(ctx);
+        return listContacts(workspaceId, input.prospectId);
+      }),
+    upsert: protectedProcedure
+      .input(
+        z.object({
+          prospectId: z.string(),
+          name: z.string().min(1).max(200),
+          title: z.string().max(200).optional(),
+          email: z.string().email().max(320),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const workspaceId = await requireWorkspace(ctx);
+        try {
+          return await upsertManualContact(workspaceId, input);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "could not save contact";
+          throw new TRPCError({ code: "BAD_REQUEST", message });
+        }
       }),
   }),
 

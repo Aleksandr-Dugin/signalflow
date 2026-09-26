@@ -1,10 +1,11 @@
 import { and, count, desc, eq, inArray } from "drizzle-orm";
 import { createHash } from "node:crypto";
+import { promises as dns, type MxRecord } from "node:dns";
 import { nanoid } from "nanoid";
 import * as schema from "../drizzle/schema";
 import { getDb } from "./_core/database";
 import { env } from "./_core/env";
-import type { IcpCriteria, ProspectCard, ProspectDetail, PersonalizationDraft } from "../shared/types";
+import type { IcpCriteria, ProspectCard, ProspectDetail, PersonalizationDraft, ContactRef } from "../shared/types";
 import type { PlanId } from "../shared/plans";
 import { getPlan } from "../shared/plans";
 import { detectObjections } from "../shared/const";
@@ -595,6 +596,93 @@ export async function getProspectDetail(workspaceId: string, prospectId: string)
         }
       : null,
   };
+}
+
+// ── Contact authoring (manual add/edit — unblocks outreach for real leads) ──────
+// Live discovery surfaces companies but not people, so a human must be able to
+// attach a decision-maker's email. Every path is workspace-scoped (IDOR-safe):
+// the prospect is resolved under the caller's workspaceId before we touch it.
+function isValidEmailFormat(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+// MX lookup with a hard timeout so a slow resolver can't hang the request.
+async function domainHasMailRecords(domain: string, timeoutMs = 3000): Promise<boolean> {
+  if (!domain) return false;
+  try {
+    const mx = await Promise.race<MxRecord[] | null>([
+      dns.resolveMx(domain),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+    ]);
+    return Array.isArray(mx) && mx.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+export async function listContacts(workspaceId: string, prospectId: string): Promise<ContactRef[]> {
+  const db = getDb();
+  if (!db) throw new Error("Database unavailable.");
+  const [prospect] = await db
+    .select({ companyId: schema.prospects.companyId })
+    .from(schema.prospects)
+    .where(and(eq(schema.prospects.id, prospectId), eq(schema.prospects.workspaceId, workspaceId)))
+    .limit(1);
+  if (!prospect) return [];
+  const rows = await db
+    .select()
+    .from(schema.contacts)
+    .where(and(eq(schema.contacts.companyId, prospect.companyId), eq(schema.contacts.workspaceId, workspaceId)))
+    .orderBy(desc(schema.contacts.createdAt));
+  return rows.map((r) => ({ id: r.id, name: r.name, title: r.title ?? null, email: r.email ?? "", verified: r.verified }));
+}
+
+export async function upsertManualContact(
+  workspaceId: string,
+  input: { prospectId: string; name: string; title?: string; email: string },
+): Promise<ContactRef> {
+  const db = getDb();
+  if (!db) throw new Error("Database unavailable.");
+  const email = input.email.trim().toLowerCase();
+  if (!isValidEmailFormat(email)) throw new Error("Enter a valid email address.");
+  const [prospect] = await db
+    .select({ companyId: schema.prospects.companyId })
+    .from(schema.prospects)
+    .where(and(eq(schema.prospects.id, input.prospectId), eq(schema.prospects.workspaceId, workspaceId)))
+    .limit(1);
+  if (!prospect) throw new Error("Prospect not found.");
+
+  const verified = await domainHasMailRecords(email.split("@")[1] ?? "");
+  const name = input.name.trim();
+  const title = input.title?.trim() || null;
+
+  const [existing] = await db
+    .select()
+    .from(schema.contacts)
+    .where(and(eq(schema.contacts.companyId, prospect.companyId), eq(schema.contacts.email, email)))
+    .limit(1);
+
+  let contactId: string;
+  if (existing) {
+    await db
+      .update(schema.contacts)
+      .set({ name, title, verified })
+      .where(eq(schema.contacts.id, existing.id));
+    contactId = existing.id;
+  } else {
+    contactId = nanoid();
+    await db.insert(schema.contacts).values({
+      id: contactId,
+      workspaceId,
+      companyId: prospect.companyId,
+      name,
+      title,
+      email,
+      verified,
+    });
+  }
+  await db.update(schema.prospects).set({ contactId }).where(eq(schema.prospects.id, input.prospectId));
+  return { id: contactId, name, title, email, verified };
 }
 
 // ── Personalization ─────────────────────────────────────────────────────────
