@@ -65,6 +65,18 @@ const REQUIRED: ColumnRequirement[] = [
     enumContains: ["won", "lost", "suppressed", "not_interested", "opportunity"],
     fix: "ALTER TABLE `prospects` MODIFY COLUMN `status` enum('new','qualified','disqualified','contacted','interested','not_interested','opportunity','suppressed','won','lost') NOT NULL DEFAULT 'new';",
   },
+  {
+    // The master autonomy switch. A missing table here is not a missing feature:
+    // autonomyState() fails closed, so an un-migrated database runs with all
+    // autonomy silently paused — loud reporting is the only way that is visible.
+    table: "system_state",
+    column: "autopilotPaused",
+    fix:
+      "CREATE TABLE `system_state` (`id` varchar(36) NOT NULL, `autopilot_paused` boolean NOT NULL DEFAULT false, " +
+      "`paused_reason` varchar(300) NOT NULL DEFAULT '', `paused_by` varchar(36), `paused_at` timestamp, " +
+      "`created_at` timestamp DEFAULT (now()), `updated_at` timestamp DEFAULT (now()), " +
+      "CONSTRAINT `system_state_id` PRIMARY KEY(`id`));",
+  },
 ];
 
 function parseEnum(columnType: string): string[] {
@@ -168,8 +180,9 @@ export async function assertSchemaReady(): Promise<void> {
   if (drift.unknownTables.length) {
     console.error(
       `[schema] tables the code requires but the database does not have: ${drift.unknownTables.join(", ")}.\n` +
-        "  drizzle/ has no migration journal, so `drizzle-kit migrate` applies nothing.\n" +
-        "  See docs/database.md for the one-time setup that creates these.",
+        "  Apply the journaled migrations with `pnpm db:migrate` — drizzle/ is " +
+        "journal-driven, so anything generated before the journal exists must be " +
+        "recreated from 0000_baseline. See docs/database.md.",
     );
   }
   if (drift.missing.length) {
@@ -179,6 +192,10 @@ export async function assertSchemaReady(): Promise<void> {
     for (const m of drift.missing) {
       console.error(`  - ${m.table}.${m.column}\n    fix: ${m.fix}`);
     }
-    console.error("  Do not enable per-workspace autopilot until these are resolved.");
+    console.error(
+      "  Do not enable per-workspace autopilot until these are resolved. The master " +
+        "autonomy switch reads the same database and fails closed, so an unreadable " +
+        "state also holds queued jobs instead of running them.",
+    );
   }
 }

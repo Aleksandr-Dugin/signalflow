@@ -20,7 +20,6 @@ import {
   getProspectThread,
   listContacts,
   upsertManualContact,
-  isAutopilotEnabled,
   listCampaigns,
   listOpportunities,
   listProspects,
@@ -35,8 +34,13 @@ import {
   adminListWorkspaces,
   adminRecentJobs,
   adminSetRole,
+  autopilotState,
   systemStatus,
 } from "./db";
+import {
+  readGlobalAutonomyState,
+  setAutopilotGloballyPaused,
+} from "./services/autonomyState";
 
 async function requireWorkspace(ctx: { user: { id: string } }): Promise<string> {
   return resolveWorkspace(ctx.user.id);
@@ -93,7 +97,7 @@ export const appRouter = router({
       }),
     autopilot: protectedProcedure.query(async ({ ctx }) => {
       const workspaceId = await requireWorkspace(ctx);
-      return { enabled: await isAutopilotEnabled(workspaceId) };
+      return autopilotState(workspaceId);
     }),
     setAutopilot: protectedProcedure
       .input(z.object({ enabled: z.boolean() }))
@@ -313,6 +317,26 @@ export const appRouter = router({
 
   admin: router({
     status: adminProcedure.query(() => systemStatus()),
+    // The kill switch, deliberately on its own rather than folded into
+    // systemStatus(): that helper is synchronous and only reports wiring, while
+    // this is an action with a reason and an actor attached.
+    autonomy: adminProcedure.query(() => readGlobalAutonomyState()),
+    setAutonomy: adminProcedure
+      .input(z.object({ paused: z.boolean(), reason: z.string().max(300).optional() }))
+      .mutation(async ({ ctx, input }) => {
+        try {
+          return await setAutopilotGloballyPaused({
+            paused: input.paused,
+            reason: input.reason,
+            actorId: ctx.user.id,
+          });
+        } catch (err) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: err instanceof Error ? err.message : "Failed to update autonomy state",
+          });
+        }
+      }),
     overview: adminProcedure.query(() => adminOverview()),
     users: adminProcedure
       .input(z.object({ limit: z.number().int().min(1).max(500).optional() }))

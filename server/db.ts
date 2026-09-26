@@ -10,6 +10,7 @@ import type { PlanId } from "../shared/plans";
 import { getPlan } from "../shared/plans";
 import { detectObjections } from "../shared/const";
 import { ensureWorkspace } from "./services/auth";
+import { isAutopilotGloballyPaused } from "./services/autonomyState";
 import {
   enforceFeature,
   enforceLimit,
@@ -857,9 +858,17 @@ export async function getWorkspacePlan(workspaceId: string): Promise<PlanId> {
 }
 
 // ── Autopilot ────────────────────────────────────────────────────────────────
+/**
+ * Per-workspace autonomy, outranked by the global kill switch. Reply ingest
+ * consults this predicate before *queueing* a follow-up, so pausing prevents new
+ * autonomous work from being created at all — `runNextJob()` separately holds
+ * work that was already in the queue. Recurring discovery does not consult it:
+ * that job emails nobody and is stopped at the worker instead.
+ */
 export async function isAutopilotEnabled(workspaceId: string): Promise<boolean> {
   const db = getDb();
   if (!db) return false;
+  if (await isAutopilotGloballyPaused()) return false;
   const [ws] = await db
     .select({ autopilot: schema.workspaces.autopilot })
     .from(schema.workspaces)
@@ -873,6 +882,26 @@ export async function setAutopilot(workspaceId: string, enabled: boolean): Promi
   if (!db) throw new Error("Database unavailable.");
   await db.update(schema.workspaces).set({ autopilot: enabled }).where(eq(schema.workspaces.id, workspaceId));
   return enabled;
+}
+
+/**
+ * The two facts the Settings screen needs, kept apart on purpose.
+ *
+ * Returning only the *effective* state would make an operator's global pause
+ * look like the workspace had switched itself off, and the owner would then
+ * "fix" a toggle that was never the problem — while the platform stayed paused.
+ */
+export async function autopilotState(
+  workspaceId: string,
+): Promise<{ enabled: boolean; globalPaused: boolean }> {
+  const db = getDb();
+  if (!db) return { enabled: false, globalPaused: true };
+  const [ws] = await db
+    .select({ autopilot: schema.workspaces.autopilot })
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId))
+    .limit(1);
+  return { enabled: Boolean(ws?.autopilot), globalPaused: await isAutopilotGloballyPaused() };
 }
 
 // ── Admin / system health ──────────────────────────────────────────────────

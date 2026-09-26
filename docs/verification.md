@@ -12,7 +12,8 @@ What CI already covers (`.github/workflows/ci.yml`):
   container: baseline migration matches `schema.ts`, outreach send + idempotent retry,
   reply ingest → classification → opportunity → follow-up job claimed and completed by
   the worker, the full CTA → Calendly → Stripe walk to `won`, webhook replay inertness,
-  and the cross-tenant address-collision refusal.
+  the cross-tenant address-collision refusal, and the master autonomy switch holding a
+  queued job, blocking new queuing, surviving a read-back, and releasing on resume.
 - `pnpm build` — Vite client bundle + esbuild server bundle.
 - `pnpm smoke` (`scripts/smoke.mjs`) — boots the real server with no database and
   asserts the HTTP edge: tracked CTA clicks redirect to the configured Calendly/Stripe
@@ -26,10 +27,10 @@ What CI already covers (`.github/workflows/ci.yml`):
 > (`161b133`) passed both jobs on real MySQL 8: migrations applied from the
 > baseline journal, and the integration suite ran to completion. The
 > `REQUIRE_INTEGRATION_TESTS` flag set in the integration job is what makes that
-> statement meaningful — without it the suite could have reported success from 9
-> silent skips, which is exactly how run #1 nearly fooled us. Two real bugs were
-> found by this suite on its first execution: the `CI`-scoped skip guard breaking
-> the `checks` job, and `applyStripeValue` writing `valueCents = 0` for every
+> statement meaningful — without it the suite could have reported success from a
+> file of silent skips, which is exactly how run #1 nearly fooled us. Two real bugs
+> were found by this suite on its first execution: the `CI`-scoped skip guard
+> breaking the `checks` job, and `applyStripeValue` writing `valueCents = 0` for every
 > Stripe Payment Link sale. Run `pnpm smoke` also passes locally and on the
 > runner. What remains genuinely unverified is everything below, which no
 > container can cover.
@@ -45,6 +46,12 @@ date and the outcome in the PR that enables autopilot.
 - [ ] Boot logs contain **no** `[schema]` lines. Any that appear name the exact
       `ALTER TABLE` to run — see [database.md](./database.md).
 - [ ] `/api/health` returns `{"ok":true,"hasDb":true}`.
+- [ ] `system_state` exists. A deployment that has not applied `0001_*.sql` reads as
+      **paused everywhere**: `autonomyAllowed()` treats an unreadable switch as
+      stopped, so nothing autonomous happens *and* nothing errors. That silence is the
+      fail-closed rule working, not a bug report — so confirm the Admin page renders
+      the switch as unreadable rather than as "live", and treat applying the migration
+      as the decision to re-enable autonomy, not as an unattended deploy step.
 
 ### 2. Outbound deliverability
 
@@ -91,6 +98,12 @@ date and the outcome in the PR that enables autopilot.
       `meeting_booked`, the cosmetic-advancement bug is back — that is a blocker.
 - [ ] Kill the server mid-job and restart; the stuck `running` row is reclaimed after
       10 minutes (`runNextJob` crash recovery) rather than being lost.
+- [ ] Pull the **master autonomy switch** mid-burst (Admin page, or
+      `admin.setAutonomy`): follow-ups already queued must not go out, a new inbound
+      reply must not queue anything, and resuming must complete the held job. Then
+      restart the server *while paused* and confirm it comes back paused — the state
+      lives in `system_state` precisely because an in-memory flag would be forgotten
+      by the crash you pulled the lever during.
 
 ### 5. Conversion callbacks
 

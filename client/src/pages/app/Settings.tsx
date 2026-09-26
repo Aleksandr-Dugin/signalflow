@@ -17,11 +17,24 @@ export default function Settings() {
   const autopilot = trpc.workspace.autopilot.useQuery();
   const setAutopilot = trpc.workspace.setAutopilot.useMutation({
     onSuccess: (r) => {
-      toast.success(r.enabled ? "Autopilot ON — AI will draft and send replies automatically" : "Autopilot OFF — nothing sends without your click");
+      // Wording has to survive the global pause: promising that AI "will send"
+      // while an operator has halted the platform would be a lie the next
+      // screen contradicts.
+      toast.success(r.enabled ? "Autopilot ON for this workspace" : "Autopilot OFF — nothing sends without your click");
       void utils.workspace.autopilot.invalidate();
     },
     onError: (e) => toast.error(e.message),
   });
+
+  // This workspace's own choice, and whether a platform operator has overridden
+  // it — kept apart deliberately. Collapsing the two would make an operator's
+  // pause look like this workspace had switched itself off, inviting the owner
+  // to "fix" a toggle that is not why nothing is sending.
+  const ownAutopilot = autopilot.data?.enabled ?? false;
+  // `undefined` until the query answers. Defaulting it to false would label the
+  // workspace "live" for a moment on every page load, and "live" is the claim
+  // this line exists to withhold while the truth is unknown.
+  const operatorPaused = autopilot.data?.globalPaused;
 
   return (
     <div>
@@ -68,15 +81,38 @@ export default function Settings() {
                   never auto-send.
                 </p>
               </div>
-              <Button
-                variant={autopilot.data?.enabled ? "default" : "outline"}
-                onClick={() => setAutopilot.mutate({ enabled: !autopilot.data?.enabled })}
-                disabled={setAutopilot.isPending || !providers.data?.email /* outreach needs email path */}
-              >
-                {autopilot.data?.enabled ? <ShieldCheck className="h-4 w-4" /> : <ShieldOff className="h-4 w-4" />}
-                {autopilot.data?.enabled ? "ON" : "OFF"}
-              </Button>
+              <div className="flex flex-col items-end gap-1.5">
+                <Button
+                  variant={ownAutopilot ? "default" : "outline"}
+                  onClick={() => setAutopilot.mutate({ enabled: !ownAutopilot })}
+                  disabled={setAutopilot.isPending || !providers.data?.email /* outreach needs email path */}
+                >
+                  {ownAutopilot ? <ShieldCheck className="h-4 w-4" /> : <ShieldOff className="h-4 w-4" />}
+                  {ownAutopilot ? "ON" : "OFF"}
+                </Button>
+                {/* Still editable while paused: recording a preference costs nothing, and
+                    blocking it would make owners re-enter a setting that was never wrong. */}
+                <span
+                  className={`font-mono text-[10px] uppercase tracking-wider ${
+                    operatorPaused ? "text-destructive" : "text-muted-foreground"
+                  }`}
+                >
+                  {operatorPaused === undefined
+                    ? "checking…"
+                    : operatorPaused
+                      ? "paused by operator"
+                      : ownAutopilot
+                        ? "live"
+                        : "off"}
+                </span>
+              </div>
             </div>
+            {operatorPaused ? (
+              <p className="mb-2 text-xs text-destructive">
+                A platform operator has paused all autonomy. This workspace's choice is saved and takes
+                effect again the moment autonomy resumes — nothing sends meanwhile.
+              </p>
+            ) : null}
             <p className="text-xs text-muted-foreground">
               Requires <code>SMTP_*</code> and <code>REPLY_INGEST_SECRET</code>. Wire your ESP to
               <code> /api/replies/webhook/&lt;provider&gt;</code> so inbound mail reaches the pipeline.

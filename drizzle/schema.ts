@@ -599,6 +599,25 @@ export const jobRuns = mysqlTable(
   }),
 );
 
+// ── Global operational state ────────────────────────────────────────────────
+// One row, id = "singleton". The master autonomy switch is deliberately *not*
+// an in-memory flag: an operator who halts sending and then restarts the server
+// — including a restart caused by a crash — must not find the system quietly
+// emailing prospects again. It is also not a column on `workspaces`, because
+// `workspaces.autopilot` is per-tenant by design and stopping everything would
+// mean rewriting every row (and losing each operator's own setting).
+export const systemState = mysqlTable("system_state", {
+  id: varchar("id", { length: 36 }).primaryKey(),
+  autopilotPaused: boolean("autopilot_paused").notNull().default(false),
+  pausedReason: varchar("paused_reason", { length: 300 }).notNull().default(""),
+  // Plain varchar, not an FK to users: the audit trail of who stopped the
+  // system must survive the deletion of that account.
+  pausedBy: varchar("paused_by", { length: 36 }),
+  pausedAt: timestamp("paused_at", { mode: "date" }),
+  createdAt: ts("created_at"),
+  updatedAt: ts("updated_at"),
+});
+
 // ── Usage (for entitlement accounting) ────────────────────────────────────────
 export const usageEvents = mysqlTable(
   "usage_events",

@@ -14,6 +14,11 @@ import { closeDb, getDb } from "./_core/database";
 import { env } from "./_core/env";
 import { detectSchemaDrift } from "./_core/schemaCheck";
 import { getJob, runNextJob } from "./services/jobs";
+import {
+  isAutopilotGloballyPaused,
+  readGlobalAutonomyState,
+  setAutopilotGloballyPaused,
+} from "./services/autonomyState";
 // Side-effect import: registers reply.followup / campaign.discovery handlers.
 import "./services/jobHandlers";
 import { makeIdempotencyKey, sendOutreachEmail } from "./services/outreach";
@@ -434,5 +439,78 @@ suite("autonomous loop against a real database", () => {
     expect(result.classification).toBeNull();
 
     await db!.delete(schema.workspaces).where(eq(schema.workspaces.id, otherWs));
+  });
+
+  // Kept last: it flips a global switch, so it must not overlap with any test
+  // that expects autonomy to be live.
+  it("the master switch holds queued work and releases it on resume", async () => {
+    // Queue real work first, while the system is live.
+    const queued = await ingestEmailEvent({
+      fromAddress: email,
+      eventType: "replied",
+      bodyText: "Great — let's talk again next week.",
+      subject: "Re: Zero-downtime migrations",
+      dedupeKey: `int:${run}:killswitch`,
+    });
+    expect(queued.duplicate).toBe(false);
+
+    const [pending] = await db!
+      .select({ id: schema.jobRuns.id })
+      .from(schema.jobRuns)
+      .where(
+        and(eq(schema.jobRuns.workspaceId, workspaceId), eq(schema.jobRuns.status, "queued")),
+      )
+      .limit(1);
+    expect(pending).toBeTruthy();
+    const jobId = pending!.id;
+
+    await setAutopilotGloballyPaused({ paused: true, reason: "integration test", actorId: userId });
+    try {
+      expect(await isAutopilotGloballyPaused()).toBe(true);
+
+      // The case isAutopilotEnabled() structurally cannot cover: work that was
+      // already in the queue when the lever was pulled must not go out.
+      expect(await runNextJob(new Date(Date.now() + 120_000))).toBe(false);
+      expect((await getJob(jobId))!.status).toBe("queued");
+
+      // And no *new* follow-up gets queued either, so the queue cannot grow behind
+      // the operator's back and all fire at once on resume.
+      await ingestEmailEvent({
+        fromAddress: email,
+        eventType: "replied",
+        bodyText: "One more thing — what does pricing look like?",
+        dedupeKey: `int:${run}:killswitch2`,
+      });
+      const stillQueued = await db!
+        .select({ id: schema.jobRuns.id })
+        .from(schema.jobRuns)
+        .where(
+          and(eq(schema.jobRuns.workspaceId, workspaceId), eq(schema.jobRuns.status, "queued")),
+        );
+      expect(stillQueued.map((j) => j.id)).toEqual([jobId]);
+
+      // Read back through the path the admin UI uses: the pause has to be
+      // persisted state, not a flag living in this process.
+      const persisted = await readGlobalAutonomyState();
+      expect(persisted?.autopilotPaused).toBe(true);
+      expect(persisted?.pausedReason).toBe("integration test");
+      expect(persisted?.pausedBy).toBe(userId);
+      expect(persisted?.pausedAt).toBeInstanceOf(Date);
+    } finally {
+      // Under no circumstances leave the platform paused for everything that
+      // runs after this file, including a run that fails an assertion midway.
+      await setAutopilotGloballyPaused({ paused: false });
+    }
+
+    expect(await isAutopilotGloballyPaused()).toBe(false);
+    expect(await runNextJob(new Date(Date.now() + 120_000))).toBe(true);
+    expect((await getJob(jobId))!.status).toBe("completed");
+
+    // Resuming clears the audit fields: "paused by X, since ..." sitting next to
+    // a live system would make the switch contradict itself on screen.
+    const after = await readGlobalAutonomyState();
+    expect(after?.autopilotPaused).toBe(false);
+    expect(after?.pausedAt).toBeNull();
+    expect(after?.pausedBy).toBeNull();
   });
 });

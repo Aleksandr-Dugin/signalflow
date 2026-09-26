@@ -32,6 +32,13 @@ hand-written files were moved to `drizzle/legacy/` — they are **superseded by 
 baseline**, kept only as historical record, and must not be applied on top of it
 (`0007_autopilot.sql` will fail with a duplicate-column error).
 
+The journal is load-bearing now, not decoration: `0001_clever_ultimo.sql` adds
+`system_state`, the master autonomy switch (27th table). It came from
+`drizzle-kit generate` after editing `drizzle/schema.ts`, and `pnpm db:migrate` applies
+baseline **and** 0001 in journal order. That is the workflow from here on: change the
+schema, generate, review the SQL, commit `drizzle/` including `meta/` — never hand-edit
+a journaled migration.
+
 ## Setting up a database from scratch
 
 ```bash

@@ -2,6 +2,7 @@ import { and, asc, eq, inArray, lt } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import * as schema from "../../drizzle/schema";
 import { getDb } from "../_core/database";
+import { isAutopilotGloballyPaused } from "./autonomyState";
 
 export interface ClaimedJob {
   id: string;
@@ -52,6 +53,16 @@ const MAX_ATTEMPTS = 3;
 export async function runNextJob(now = new Date()): Promise<boolean> {
   const db = getDb();
   if (!db) return false;
+
+  // The master switch is checked here as well as in isAutopilotEnabled(), and
+  // the two are not redundant: that one only prevents *new* follow-ups from
+  // being queued. Pausing has to stop work that is already in the queue too,
+  // otherwise an operator pulling the lever mid-burst would watch the remaining
+  // emails go out anyway. Jobs stay `queued` and run on resume.
+  //
+  // Deliberately read on every claim and not cached: a lever that stops sending
+  // must not lag, and this is one single-row primary-key lookup.
+  if (await isAutopilotGloballyPaused()) return false;
 
   // Recover jobs stuck in "running" for > 10 min (crashed worker).
   await db

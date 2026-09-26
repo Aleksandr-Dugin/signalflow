@@ -54,6 +54,10 @@ export default function Admin() {
   const users = trpc.admin.users.useQuery({ limit: 200 }, { enabled: isAdmin });
   const workspaces = trpc.admin.workspaces.useQuery({ limit: 200 }, { enabled: isAdmin });
   const jobs = trpc.admin.recentJobs.useQuery({ limit: 30 }, { enabled: isAdmin });
+  const autonomy = trpc.admin.autonomy.useQuery(undefined, {
+    enabled: isAdmin,
+    refetchInterval: 10000,
+  });
   const utils = trpc.useUtils();
   const setRole = trpc.admin.setRole.useMutation({
     onSuccess: () => {
@@ -62,6 +66,29 @@ export default function Admin() {
     },
     onError: (e) => toast.error(e.message),
   });
+  const setAutonomy = trpc.admin.setAutonomy.useMutation({
+    onSuccess: (r) => {
+      if (r.autopilotPaused) {
+        toast.warning("Autonomy paused everywhere — no AI sends, queued jobs held");
+      } else {
+        toast.success("Autonomy resumed — each workspace's own setting applies again");
+      }
+      void utils.admin.autonomy.invalidate();
+      void utils.workspace.autopilot.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
+  // A switch we cannot read is a switch that is protecting you: the server fails
+  // closed for exactly this case, so the UI has to agree rather than imply "not
+  // paused" just because no row said so. "Haven't read it yet" is kept apart from
+  // "read it and it is null" — the first is a spinner, the second is an incident
+  // note, and announcing either as *paused* would have an admin act on a state the
+  // system never reported.
+  const unreadable = autonomy.data === null;
+  const unanswered = autonomy.data === undefined;
+  const paused = unanswered || unreadable || Boolean(autonomy.data?.autopilotPaused);
+  const canToggle = !unanswered && !unreadable;
 
   if (me.isLoading) {
     return (
@@ -89,6 +116,70 @@ export default function Admin() {
   return (
     <div>
       <PageHeader title="Admin" description="System health, tenants and job pipeline — visible to administrators only." />
+
+      {/* Master autonomy switch */}
+      <Card className={cn("brutal-sm mb-4", paused && !unanswered && "border-destructive")}>
+        <CardContent className="flex flex-wrap items-center justify-between gap-4 p-5">
+          <div>
+            <h2 className="flex items-center gap-2 font-grotesk text-lg font-black">
+              <ShieldAlert
+                className={cn(
+                  "h-5 w-5",
+                  !canToggle ? "text-muted-foreground" : paused ? "text-destructive" : "text-success",
+                )}
+              />
+              {unanswered
+                ? "Checking the autonomy switch…"
+                : unreadable
+                  ? "Autonomy switch unreadable"
+                  : paused
+                    ? "All autonomy is paused"
+                    : "Autonomy is live"}
+            </h2>
+            <p className="mt-1 max-w-xl text-sm text-muted-foreground">
+              Stops AI follow-ups and halts the job queue across every workspace at once. The state is
+              stored in the database, so a restart — including one caused by a crash — does not silently
+              resume sending. Queued work is kept and runs when you resume.
+            </p>
+            {paused && autonomy.data?.pausedAt ? (
+              <p className="mt-2 font-mono text-xs text-destructive">
+                since {new Date(autonomy.data.pausedAt).toLocaleString()}
+                {autonomy.data.pausedReason ? ` — ${autonomy.data.pausedReason}` : ""}
+              </p>
+            ) : null}
+            {unanswered && !autonomy.isPending ? (
+              <p className="mt-2 font-mono text-xs text-destructive">
+                The admin query failed to answer at all — holding in safe mode rather than
+                guessing.
+              </p>
+            ) : null}
+            {unreadable ? (
+              <p className="mt-2 font-mono text-xs text-destructive">
+                The server could not read system_state, so the platform is holding in safe
+                mode — apply the migration. A switch that cannot be read cannot be written
+                from here either.
+              </p>
+            ) : null}
+          </div>
+          {/* Deliberately a single click when it works: a control whose job is to stop
+              things mid-incident should never be behind a confirmation dialog. */}
+          <Button
+            variant={paused ? "default" : "destructive"}
+            onClick={() => setAutonomy.mutate({ paused: !paused })}
+            disabled={!canToggle || setAutonomy.isPending}
+            title={canToggle ? undefined : "Unknown switch state: refusing to write over it"}
+            className="brutal-sm min-w-44"
+          >
+            {setAutonomy.isPending
+              ? "Working…"
+              : !canToggle
+                ? "Unavailable"
+                : paused
+                  ? "Resume autonomy"
+                  : "Pause everything now"}
+          </Button>
+        </CardContent>
+      </Card>
 
       {/* Health */}
       <Card className="brutal-sm mb-4">
@@ -192,7 +283,7 @@ export default function Admin() {
             <div className="max-h-[24rem] overflow-auto">
               <table className="w-full text-sm">
                 <thead className="sticky top-0 text-left text-xs text-muted-foreground">
-                  <tr><th className="py-1.5 font-medium">Workspace</th><th className="py-1.5 font-medium">Plan</th><th className="py-1.5 font-medium">Autopilot</th></tr>
+                  <tr><th className="py-1.5 font-medium">Workspace</th><th className="py-1.5 font-medium">Plan</th><th className="py-1.5 font-medium">Autopilot (their setting)</th></tr>
                 </thead>
                 <tbody>
                   {(workspaces.data ?? []).map((w) => (
@@ -202,7 +293,16 @@ export default function Admin() {
                         <div className="text-xs text-muted-foreground">{w.ownerEmail ?? w.slug}</div>
                       </td>
                       <td className="py-2"><Badge variant="muted">{w.planId}</Badge></td>
-                      <td className="py-2">{w.autopilot ? <Badge variant="success">on</Badge> : <Badge variant="muted">off</Badge>}</td>
+                      <td className="py-2">{
+                        /* While the master switch holds, a workspace's own "on" is a
+                           stored preference and nothing is sending — so the badge says
+                           "armed" in the neutral tone instead of claiming activity. */
+                        w.autopilot ? (
+                          <Badge variant={paused ? "muted" : "success"}>{paused ? "armed" : "on"}</Badge>
+                        ) : (
+                          <Badge variant="muted">off</Badge>
+                        )
+                      }</td>
                     </tr>
                   ))}
                 </tbody>

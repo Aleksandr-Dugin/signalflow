@@ -8,7 +8,8 @@ this file.
 
 Every autonomous move is gated by a **per-workspace** switch, `workspaces.autopilot`
 (see the column comment in `drizzle/schema.ts`). It is toggled by the operator on the
-in-app Settings page — never by the AI, and never as a global default.
+in-app Settings page — never by the AI, and never as a global default. A platform
+operator can override all of them at once; see "The switch above the switch" below.
 
 | `autopilot` | Behaviour |
 | --- | --- |
@@ -17,6 +18,29 @@ in-app Settings page — never by the AI, and never as a global default.
 
 Autonomy is scoped to *sending the next message in an existing conversation*. It can
 never create campaigns, change plans, edit entitlements, or reach the admin surface.
+
+### The switch above the switch
+
+`workspaces.autopilot` is a tenant's own preference. It is outranked by a **platform
+master switch**, `system_state.autopilotPaused` (`server/services/autonomyState.ts`),
+which an admin toggles on the in-app Admin page (`admin.autonomy` /
+`admin.setAutonomy`). Two levels, two different jobs:
+
+| Gate | Enforced in | What it cannot do alone |
+| --- | --- | --- |
+| `workspaces.autopilot` | `isAutopilotEnabled()` → reply ingest | Stop work already in the queue: the flag is read when a follow-up is *created*. |
+| `system_state.autopilotPaused` | `runNextJob()` **and** `isAutopilotEnabled()` | Nothing on its own — it is the backstop for bursts that were queued before the lever was pulled. |
+
+Properties that are load-bearing, and asserted by tests:
+
+- **Persisted, not in memory.** A restart — including one caused by a crash — must not
+  silently resume sending to real prospects.
+- **Fails closed.** A switch that cannot be read (unapplied migration, dead pool,
+  query error) counts as *paused*. `autonomyAllowed()` is pure so this polarity is a
+  unit test, not a reading-comprehension exercise.
+- **Queued work is held, not dropped.** It runs on resume, so pausing during an
+  incident neither sends the burst nor loses the pipeline.
+- **Two independent enforcement points.** Both are needed; see the table above.
 
 ## The one loop that runs unattended
 
@@ -59,6 +83,10 @@ same message is prevented by the unique `(workspaceId, idempotencyKey)` index on
 `DISCOVERY_INTERVAL_HOURS` (default `0`) turns the job worker into a lightweight cron:
 after `campaign.discovery` completes, a positive interval re-enqueues the same
 campaign. `0` disables recurring discovery entirely — there is no scheduler dependency.
+Note the asymmetry with the table above: the re-enqueue does **not** consult
+`workspaces.autopilot` (a discovery run emails nobody, so the per-tenant sending
+switch has never applied to it), but the master switch does stop it, because the
+worker refuses to claim any job while autonomy is paused.
 
 ## Funnel stages are evidence-driven, never cosmetic
 
