@@ -1,0 +1,388 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  /* Light theme — off-white blueprint, kept secondary (default is dark). */
+  --background: oklch(0.97 0.006 250);
+  --foreground: oklch(0.22 0.02 265);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.22 0.02 265);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.22 0.02 265);
+  --primary: oklch(0.72 0.19 128);
+  --primary-foreground: oklch(0.18 0.03 150);
+  --secondary: oklch(0.95 0.01 250);
+  --secondary-foreground: oklch(0.3 0.02 268);
+  --muted: oklch(0.95 0.008 250);
+  --muted-foreground: oklch(0.5 0.02 268);
+  --accent: oklch(0.93 0.03 150);
+  --accent-foreground: oklch(0.3 0.06 150);
+  --signal: oklch(0.55 0.16 244);
+  --signal-foreground: oklch(0.98 0.01 244);
+  --destructive: oklch(0.58 0.22 25);
+  --destructive-foreground: oklch(0.98 0.01 25);
+  --success: oklch(0.56 0.15 150);
+  --border: oklch(0.22 0.02 265 / 0.85);
+  --input: oklch(0.22 0.02 265);
+  --ring: oklch(0.72 0.19 128);
+  --brutal-ink: oklch(0.16 0.01 260);
+  --brutal-line: oklch(0.16 0.01 260);
+  --radius: 0.125rem;
+}
+
+.dark {
+  /* Neo-brutalism dark: near-black slate, hard near-white outlines, acid fill. */
+  --background: oklch(0.165 0.008 255);
+  --foreground: oklch(0.97 0.006 255);
+  --card: oklch(0.205 0.01 255);
+  --card-foreground: oklch(0.97 0.006 255);
+  --popover: oklch(0.2 0.01 255);
+  --popover-foreground: oklch(0.97 0.006 255);
+  --primary: oklch(0.87 0.2 122);
+  --primary-foreground: oklch(0.16 0.02 150);
+  --secondary: oklch(0.27 0.01 255);
+  --secondary-foreground: oklch(0.96 0.008 255);
+  --muted: oklch(0.25 0.008 255);
+  --muted-foreground: oklch(0.73 0.015 255);
+  --accent: oklch(0.28 0.02 255);
+  --accent-foreground: oklch(0.96 0.01 255);
+  --signal: oklch(0.8 0.15 236);
+  --signal-foreground: oklch(0.16 0.02 236);
+  --destructive: oklch(0.68 0.21 25);
+  --destructive-foreground: oklch(0.98 0.01 25);
+  --success: oklch(0.8 0.17 150);
+  --border: oklch(0.97 0.006 255 / 0.16);
+  --input: oklch(0.97 0.006 255 / 0.22);
+  --ring: oklch(0.87 0.2 122);
+  --brutal-ink: oklch(0.12 0.01 260);
+  --brutal-line: oklch(0.97 0.006 255 / 0.85);
+  --radius: 0.125rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-signal: var(--signal);
+  --color-signal-foreground: var(--signal-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-grotesk: "Archivo", "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  h1, h2, h3, h4 {
+    font-family: var(--font-grotesk);
+    /* Looser tracking + breathing line-height so heavy display weights stop merging. */
+    letter-spacing: -0.012em;
+    line-height: 1.1;
+    font-weight: 800;
+    text-wrap: balance;
+  }
+  /* Keep anchor targets clear of the sticky header when navigating. */
+  [id] { scroll-margin-top: 5.5rem; }
+  ::selection {
+    background: var(--primary);
+    color: var(--primary-foreground);
+  }
+  /* Neo-brutal focus: a solid acid ring, no soft glow. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+}
+
+@keyframes sf-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes sf-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+@keyframes sf-ticker {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+@keyframes sf-barpulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+@keyframes sf-fade-up {
+  from { opacity: 0; transform: translateY(22px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes sf-glow {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+@layer utilities {
+  .font-grotesk { font-family: var(--font-grotesk); }
+  .font-mono { font-family: var(--font-mono); }
+
+  /* Monospaced uppercase metadata label — the voice of the technical identity. */
+  .mono-label {
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    font-size: 0.7rem;
+    line-height: 1;
+  }
+
+  /* Technical blueprint grid. Sharp, faint — never blurry blobs. */
+  .bg-blueprint {
+    background-image:
+      linear-gradient(to right, color-mix(in oklab, var(--foreground) 5%, transparent) 1px, transparent 1px),
+      linear-gradient(to bottom, color-mix(in oklab, var(--foreground) 5%, transparent) 1px, transparent 1px);
+    background-size: 34px 34px;
+  }
+  .bg-blueprint-fade {
+    -webkit-mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, #000 30%, transparent 85%);
+    mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, #000 30%, transparent 85%);
+  }
+
+  /* Core brutal surfaces: 1px hard outline + solid offset shadow. */
+  .brutal {
+    background: var(--card);
+    border: 1px solid var(--brutal-line);
+    border-radius: var(--radius);
+    box-shadow: 5px 5px 0 0 var(--brutal-ink);
+  }
+  .brutal-sm {
+    background: var(--card);
+    border: 1px solid var(--brutal-line);
+    border-radius: var(--radius);
+    box-shadow: 3px 3px 0 0 var(--brutal-ink);
+  }
+  .brutal-flat {
+    background: var(--card);
+    border: 1px solid var(--brutal-line);
+    border-radius: var(--radius);
+  }
+  .brutal-accent {
+    border-color: var(--primary);
+    box-shadow: 6px 6px 0 0 var(--brutal-ink);
+  }
+
+  /* Buttons: tactile, press into their own shadow. */
+  .brutal-press {
+    cursor: pointer;
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+  }
+  .brutal-press:hover { transform: translate(-1px, -1px); box-shadow: 6px 6px 0 0 var(--brutal-ink); }
+  .brutal-press:active { transform: translate(3px, 3px); box-shadow: 0 0 0 0 var(--brutal-ink); }
+
+  .btn-acid {
+    cursor: pointer;
+    background: var(--primary);
+    color: var(--primary-foreground);
+    border: 1px solid var(--brutal-ink);
+    box-shadow: 4px 4px 0 0 var(--brutal-ink);
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 700;
+    transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
+  }
+  .btn-acid:hover { transform: translate(-1px, -1px); box-shadow: 5px 6px 0 0 var(--brutal-ink); filter: brightness(1.08); }
+  .btn-acid:active { transform: translate(3px, 3px); box-shadow: 0 0 0 0 var(--brutal-ink); filter: brightness(0.96); }
+
+  .btn-outline-brutal {
+    cursor: pointer;
+    background: var(--card);
+    color: var(--foreground);
+    border: 1px solid var(--brutal-line);
+    box-shadow: 4px 4px 0 0 var(--brutal-ink);
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+    transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  }
+  .btn-outline-brutal:hover { transform: translate(-1px, -1px); box-shadow: 5px 6px 0 0 var(--brutal-ink); border-color: var(--primary); color: var(--primary); }
+  .btn-outline-brutal:active { transform: translate(3px, 3px); box-shadow: 0 0 0 0 var(--brutal-ink); }
+
+  /* Solid acid panel — self-contained so no utility can fight its background. */
+  .brutal-acid {
+    background: var(--primary);
+    color: var(--primary-foreground);
+    border: 1px solid var(--brutal-ink);
+    border-radius: var(--radius);
+    box-shadow: 5px 5px 0 0 var(--brutal-ink);
+  }
+  /* Dark button that lives on an acid panel. */
+  .btn-ink {
+    cursor: pointer;
+    background: var(--brutal-ink);
+    color: var(--primary);
+    border: 1px solid var(--brutal-ink);
+    box-shadow: 4px 4px 0 0 color-mix(in oklab, var(--primary) 55%, black);
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 700;
+    transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
+  }
+  .btn-ink:hover { transform: translate(-1px, -1px); box-shadow: 5px 6px 0 0 color-mix(in oklab, var(--primary) 55%, black); filter: brightness(1.12); }
+  .btn-ink:active { transform: translate(3px, 3px); box-shadow: 0 0 0 0 transparent; }
+
+  /* Prominent third-party (OAuth) buttons that still give hover feedback when disabled. */
+  .btn-oauth {
+    cursor: pointer;
+    background: var(--card);
+    color: var(--foreground);
+    border: 1px solid var(--brutal-line);
+    box-shadow: 3px 3px 0 0 var(--brutal-ink);
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+    transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease, color 0.12s ease, background-color 0.12s ease;
+  }
+  .btn-oauth:hover { transform: translate(-1px, -1px); box-shadow: 5px 6px 0 0 var(--brutal-ink); border-color: var(--primary); color: var(--primary); background: color-mix(in oklab, var(--primary) 8%, var(--card)); }
+  .btn-oauth:active { transform: translate(2px, 2px); box-shadow: 0 0 0 0 var(--brutal-ink); }
+  /* Disabled (OAuth not configured): keep it visible + hoverable, but signal it. */
+  .btn-oauth:disabled { opacity: 1 !important; pointer-events: auto !important; cursor: not-allowed; color: var(--muted-foreground); }
+  .btn-oauth:disabled:hover { border-color: color-mix(in oklab, var(--primary) 55%, var(--brutal-line)); color: var(--foreground); transform: none; box-shadow: 3px 3px 0 0 var(--brutal-ink); background: var(--card); }
+
+  .tabular { font-variant-numeric: tabular-nums; }
+
+  .caret::after {
+    content: "";
+    display: inline-block;
+    width: 0.6ch;
+    height: 1.05em;
+    margin-left: 2px;
+    background: var(--primary);
+    vertical-align: text-bottom;
+    animation: sf-blink 1.1s step-end infinite;
+  }
+
+  .animate-rise { animation: sf-rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .animate-blink { animation: sf-blink 1.1s step-end infinite; }
+  .animate-ticker { animation: sf-ticker 28s linear infinite; }
+  .animate-barpulse { animation: sf-barpulse 1.8s ease-in-out infinite; }
+
+  /* Scroll-reveal: hidden until the observer adds .is-visible (see Reveal). */
+  .reveal { opacity: 0; will-change: transform, opacity; }
+  .reveal.is-visible { animation: sf-fade-up 0.65s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+  /* Cards that lift toward the cursor (pricing, prospect, stat panels). */
+  .hoverable { transition: transform 0.16s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.16s ease; }
+  .hoverable:hover { transform: translate(-2px, -2px); box-shadow: 8px 8px 0 0 var(--brutal-ink); }
+  .hoverable:active { transform: translate(1px, 1px); box-shadow: 3px 3px 0 0 var(--brutal-ink); }
+
+  /* Flat grid tiles: slide in a left acid accent bar + tint on hover. */
+  .tile { position: relative; transition: background-color 0.2s ease; overflow: hidden; }
+  .tile::before {
+    content: "";
+    position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+    background: var(--primary); transition: width 0.2s ease;
+  }
+  .tile:hover { background: color-mix(in oklab, var(--primary) 7%, var(--card)); }
+  .tile:hover::before { width: 3px; }
+
+  /* Animated nav underline. */
+  .navlink { position: relative; }
+  .navlink::after {
+    content: ""; position: absolute; left: 0; bottom: -4px; height: 2px; width: 0;
+    background: var(--primary); transition: width 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .navlink:hover::after { width: 100%; }
+
+  /* Table row feedback for admin/data views. */
+  .row-hover { transition: background-color 0.12s ease; }
+  .row-hover:hover { background: color-mix(in oklab, var(--primary) 6%, transparent); }
+
+  /* Scroll progress line, pinned to the very top of the viewport. */
+  .scroll-progress { position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 60; pointer-events: none; }
+  .scroll-progress__bar { height: 100%; width: 100%; transform: scaleX(0); transform-origin: 0 50%; background: var(--primary); }
+
+  /* Magnetic button wrapper (transform composed by JS). */
+  .magnetic { transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1); will-change: transform; }
+
+  /* Custom acid cursor: square dot + trailing ring. */
+  .cursor-dot, .cursor-ring { position: fixed; top: 0; left: 0; z-index: 70; pointer-events: none; opacity: 0; will-change: transform; }
+  .cursor-dot { width: 6px; height: 6px; margin: -3px 0 0 -3px; background: var(--primary); }
+  .cursor-ring { width: 34px; height: 34px; margin: -17px 0 0 -17px; border: 1px solid var(--brutal-line); border-radius: 2px; transition: width 0.18s ease, height 0.18s ease, margin 0.18s ease, border-color 0.18s ease, background-color 0.18s ease; }
+  .cursor-ring.is-hot { width: 54px; height: 54px; margin: -27px 0 0 -27px; border-color: var(--primary); background: color-mix(in oklab, var(--primary) 12%, transparent); }
+  body.has-custom-cursor, body.has-custom-cursor a, body.has-custom-cursor button { cursor: none; }
+  body.has-custom-cursor input, body.has-custom-cursor textarea, body.has-custom-cursor select { cursor: auto; }
+
+  /* Animated score meter fill. */
+  .scorebar__fill { transition: width 0.9s cubic-bezier(0.16, 1, 0.3, 1); }
+
+  /* On-brand skeleton: hard-edged pulsing block (no gradient shimmer). */
+  .skel { background: color-mix(in oklab, var(--foreground) 8%, transparent); border: 1px solid var(--brutal-line); border-radius: 3px; animation: sf-barpulse 1.4s ease-in-out infinite; }
+
+  /* Cursor-tracking hover glow for cards/tiles. */
+  .spotlight { position: relative; }
+  .spotlight::after {
+    content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+    background: radial-gradient(220px circle at var(--mx, 50%) var(--my, 0%), color-mix(in oklab, var(--primary) 16%, transparent), transparent 60%);
+    opacity: 0; transition: opacity 0.25s ease;
+  }
+  .spotlight:hover::after { opacity: 1; }
+
+  /* Sticky-step active highlight (driven by useActiveIndex). */
+  .tile.is-active { background: color-mix(in oklab, var(--primary) 9%, var(--card)); }
+  .tile.is-active::before { width: 3px; }
+
+  /* Route-change entrance for the app shell. */
+  .route-enter { animation: sf-fade-up 0.4s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+  /* Brief global color transition while the theme is toggled. */
+  .theme-anim, .theme-anim *, .theme-anim *::before, .theme-anim *::after {
+    transition: background-color 0.35s ease, border-color 0.35s ease, color 0.35s ease, fill 0.35s ease, stroke 0.35s ease !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  /* Never leave scroll-reveal content hidden when motion is reduced. */
+  .reveal { opacity: 1 !important; }
+  /* Custom cursor is a motion affordance — drop it and restore the native one. */
+  .cursor-dot, .cursor-ring { display: none !important; }
+  body.has-custom-cursor, body.has-custom-cursor a, body.has-custom-cursor button { cursor: auto; }
+}

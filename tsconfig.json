@@ -3,8 +3,9 @@
   "exclude": ["node_modules", "build", "dist", "**/*.test.ts"],
   "compilerOptions": {
     "incremental": true,
-    "tsBuildInfoFile": "./node_modules/typescript/tsbuildinfo",
+    "tsBuildInfoFile": "./node_modules/.tsbuildinfo",
     "noEmit": true,
+    "target": "ES2022",
     "module": "ESNext",
     "strict": true,
     "lib": ["esnext", "dom", "dom.iterable"],
@@ -12,6 +13,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
     "moduleResolution": "bundler",
     "baseUrl": ".",
     "types": ["node", "vite/client"],

@@ -1,0 +1,26 @@
+# Local development database for SignalFlow (MySQL 8, wire-compatible with the
+# TiDB/MySQL instances used in production — see docs/database.md).
+#   docker compose up -d
+#   DATABASE_URL=mysql://signalflow:signalflow@localhost:3306/signalflow
+name: signalflow
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: signalflow-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: signalflow
+      MYSQL_USER: signalflow
+      MYSQL_PASSWORD: signalflow
+    ports:
+      - "3306:3306"
+    volumes:
+      - signalflow-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-psignalflow", "-usignalflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  signalflow-mysql-data:

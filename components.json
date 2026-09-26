@@ -5,7 +5,7 @@
   "tsx": true,
   "tailwind": {
     "css": "client/src/index.css",
-    "baseColor": "neutral",
+    "baseColor": "slate",
     "cssVariables": true,
     "prefix": ""
   },
@@ -15,5 +15,6 @@
     "ui": "@/components/ui",
     "lib": "@/lib",
     "hooks": "@/hooks"
-  }
+  },
+  "iconLibrary": "lucide"
 }
