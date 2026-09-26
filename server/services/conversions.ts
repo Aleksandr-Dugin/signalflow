@@ -144,11 +144,29 @@ export async function recordCtaClick(referenceId: string, kind: CtaKind): Promis
   });
 }
 
+/**
+ * Calendly v2 delivers the booked person as an Invitee *resource*:
+ *
+ *   { "event": "invitee.created", "event_uuid": "...",
+ *     "payload": { "resource": { "email": "...", "status": "active",
+ *                   "scheduled_event": { "name": "30min", ... } } } }
+ *
+ * The superseded v1 subscription shape carried the same facts at payload.invitee
+ * and payload.event, so both are read and a host still on the old format keeps
+ * converting. Note that `event.created` is not a valid v2 event name at all —
+ * the v2 set is invitee.created / invitee.canceled / invitee_no_show.created.
+ */
 export interface CalendlyPayload {
   event?: string;
   event_uuid?: string;
   payload?: {
-    invitee?: { email?: string; created_at?: string } | null;
+    resource?: {
+      email?: string;
+      status?: string;
+      scheduled_event?: { name?: string; status?: string } | null;
+      cancellation?: { canceled_by?: string } | null;
+    } | null;
+    invitee?: { email?: string; status?: string; created_at?: string } | null;
     event?: { name?: string; status?: string } | null;
     canceler?: { email?: string } | null;
     recipient?: { email?: string } | null;
@@ -156,37 +174,73 @@ export interface CalendlyPayload {
 }
 
 /**
- * Calendly `event.created` / `event.accepted` -> meeting_booked.
- * `event.canceled` is recorded but never moves a deal backwards; the operator
- * decides what a no-show means.
+ * Read the invitee address and meeting state out of a Calendly payload.
+ *
+ * Deliberately separated from handleCalendlyEvent(): that one needs a database,
+ * so a wrong field path is only observable against live MySQL and stays invisible
+ * to CI. As a pure function this is covered by the no-database unit suite, which
+ * is the only reason the `payload.invitee` read (v1) versus the real
+ * `payload.resource.email` (v2) is fixed now rather than by a customer asking
+ * why no meeting ever appeared.
+ */
+export function parseCalendlyPayload(body: CalendlyPayload): {
+  inviteeEmail: string | null;
+  eventName: string | null;
+  eventStatus: string | null;
+  canceled: boolean;
+  noShow: boolean;
+} {
+  const name = String(body?.event ?? "");
+  const resource = body?.payload?.resource;
+  const legacy = body?.payload?.invitee;
+  const status = resource?.status ?? legacy?.status ?? resource?.scheduled_event?.status ?? null;
+  return {
+    inviteeEmail: resource?.email ?? legacy?.email ?? null,
+    eventName: resource?.scheduled_event?.name ?? body?.payload?.event?.name ?? null,
+    eventStatus: status ?? body?.payload?.event?.status ?? null,
+    // The resource status is authoritative; the event name is the fallback for a
+    // payload that omits it, so a cancellation is never mistaken for a booking.
+    canceled:
+      status === "canceled" ||
+      body?.payload?.canceler?.email !== undefined ||
+      /cancel/i.test(name),
+    noShow: /no_show/i.test(name),
+  };
+}
+
+/**
+ * Calendly invitee.created -> meeting_booked.
+ *
+ * Cancellations and no-shows are recorded but never move a deal backwards or
+ * re-confirm it; the operator decides what a no-show means for the pipeline.
  */
 export async function handleCalendlyEvent(body: CalendlyPayload): Promise<ConversionOutcome> {
   const db = getDb();
   if (!db) return NO_DB;
   const name = String(body?.event ?? "");
-  const inviteeEmail = body?.payload?.invitee?.email;
+  const { inviteeEmail, eventName, eventStatus, canceled, noShow } = parseCalendlyPayload(body);
   if (!name || !inviteeEmail) return { handled: false, reason: "malformed_payload" };
 
   const owner = await ownerFromAddress(db, inviteeEmail);
   if (!owner) return { handled: false, reason: "unmatched_invitee" };
 
-  const canceled = /cancel/i.test(name);
+  // A withdrawal must not emit the signal that advances the deal, otherwise a
+  // cancellation would (re)confirm the meeting it just removed.
+  const withdrawn = canceled || noShow;
   return recordConversion(db, {
     ...owner,
     fromAddress: inviteeEmail,
     eventType: "converted",
     providerEvent: `calendly.${name}`.slice(0, 40),
-    subject: canceled
-      ? `Calendly meeting cancelled (${name})`
-      : `Meeting scheduled via Calendly (${name})`,
+    subject: `Calendly meeting ${canceled ? "cancelled" : noShow ? "missed (no-show)" : "scheduled"} (${name})`,
     dedupeKey: `calendly:${body.event_uuid ?? name}:${name}`,
-    signal: canceled ? "cta_clicked:booking" : "meeting_confirmed",
+    signal: withdrawn ? "cta_clicked:booking" : "meeting_confirmed",
     metadata: {
       provider: "calendly",
       calendlyEvent: name,
       eventUuid: body.event_uuid ?? null,
-      eventName: body?.payload?.event?.name ?? null,
-      eventStatus: body?.payload?.event?.status ?? null,
+      eventName,
+      eventStatus,
     },
   });
 }

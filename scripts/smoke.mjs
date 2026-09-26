@@ -109,11 +109,16 @@ async function main() {
   );
 
   // ── Conversion webhook auth ────────────────────────────────────────────────
+  // The shape and scheme Calendly actually uses: event `invitee.created`, the
+  // invitee under payload.resource, and a `t=…,v1=…` signature header. Signing
+  // with v1 rather than v0 is deliberate — a digest prefix the live provider
+  // never sends would leave this suite green while real callbacks failed auth.
   const calendlyBody = JSON.stringify({
-    event: "event.created",
+    event: "invitee.created",
     event_uuid: "evt_smoke",
-    payload: { invitee: { email: "someone@example.test" }, event: { name: "30min" } },
+    payload: { resource: { email: "someone@example.test", status: "active" } },
   });
+  const calendlyDigest = "v1";
   const ts = Math.floor(Date.now() / 1000);
   const post = (url, body, headers = {}) =>
     fetch(`${BASE}${url}`, {
@@ -129,7 +134,7 @@ async function main() {
     String(unsigned.status),
   );
 
-  const wrongKey = sign("not_the_secret", ts, calendlyBody, "v0");
+  const wrongKey = sign("not_the_secret", ts, calendlyBody, calendlyDigest);
   const forged = await post("/api/conversions/calendly", calendlyBody, {
     "calendly-webhook-signature": wrongKey,
   });
@@ -139,7 +144,7 @@ async function main() {
     String(forged.status),
   );
 
-  const validCalendly = sign(CALENDLY_SECRET, ts, calendlyBody, "v0");
+  const validCalendly = sign(CALENDLY_SECRET, ts, calendlyBody, calendlyDigest);
   const tampered = await post("/api/conversions/calendly", calendlyBody.replace("someone@", "victim@"), {
     "calendly-webhook-signature": validCalendly,
   });
@@ -149,7 +154,7 @@ async function main() {
     String(tampered.status),
   );
 
-  const stale = sign(CALENDLY_SECRET, ts - 3600, calendlyBody, "v0");
+  const stale = sign(CALENDLY_SECRET, ts - 3600, calendlyBody, calendlyDigest);
   const replay = await post("/api/conversions/calendly", calendlyBody, {
     "calendly-webhook-signature": stale,
   });
@@ -157,7 +162,7 @@ async function main() {
 
   // Correctly signed but no database: must NOT be a 2xx, or the provider marks
   // the delivery successful and the conversion signal is lost permanently.
-  const fresh = sign(CALENDLY_SECRET, ts, calendlyBody, "v0");
+  const fresh = sign(CALENDLY_SECRET, ts, calendlyBody, calendlyDigest);
   const accepted = await post("/api/conversions/calendly", calendlyBody, {
     "calendly-webhook-signature": fresh,
   });

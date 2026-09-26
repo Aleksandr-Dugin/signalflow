@@ -441,7 +441,7 @@ export const outreachMessages = mysqlTable(
 // the conversion callbacks (docs/ai-agents.md):
 //   clicked   - prospect followed a tracked CTA link (see services/cta.ts)
 //   converted - an external system confirmed an outcome; `classification` keeps
-//               the provider event name (calendly.event.created, stripe.
+//               the provider event name (calendly.invitee.created, stripe.
 //               checkout.session.completed, ...) and `metadata` the raw payload
 export const emailEvents = mysqlTable(
   "email_events",

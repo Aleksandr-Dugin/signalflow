@@ -42,7 +42,7 @@ if (!databaseConfigured) {
     );
   }
   console.warn(
-    "[integration] DATABASE_URL unset — skipping the 8 database-backed tests.",
+    "[integration] DATABASE_URL unset — the database-backed tests in this file are skipping.",
   );
 }
 const suite = databaseConfigured ? describe : describe.skip;
@@ -286,11 +286,13 @@ suite("autonomous loop against a real database", () => {
     expect(booking.handled).toBe(true);
     expect(booking.stage).toBe("responded");
 
-    // 2. Calendly confirms the event -> meeting_booked.
+    // 2. Calendly confirms the event -> meeting_booked. Sent in the v2 wire
+    // shape (payload.resource) rather than the retired v1 payload.invitee, so
+    // this walks the funnel the way the provider actually posts to it.
     const calendly = await handleCalendlyEvent({
-      event: "event.created",
+      event: "invitee.created",
       event_uuid: `cal_${run}`,
-      payload: { invitee: { email }, event: { name: "30min", status: "active" } },
+      payload: { resource: { email, status: "active", scheduled_event: { name: "30min", status: "active" } } },
     });
     expect(calendly.handled).toBe(true);
     expect(calendly.stage).toBe("meeting_booked");

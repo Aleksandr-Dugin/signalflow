@@ -87,14 +87,21 @@ date and the outcome in the PR that enables autopilot.
 ### 5. Conversion callbacks
 
 The `401`/`503` status contract for both endpoints is already asserted by `pnpm smoke`.
-What CI **cannot** check is that our assumptions about the real providers hold — the
-signature scheme (`t=…,v0=…` for Calendly, `t=…,v1=…` for Stripe), the event names, and
-the JSON paths to the invitee email and the amount are all read from documentation, not
-from a captured payload. Verify them against a live delivery before trusting a `won`.
+What CI **cannot** check is that a real delivery resembles the fixtures we wrote.
+Two assumptions have now been corrected against the providers' own documentation
+instead of inference: Calendly signs `t=…,v1=…` (**not** `v0`) on the
+`Calendly-Webhook-Signature` header, and its v2 payload carries the invitee at
+`payload.resource.email` under an `invitee.created` event — `event.created` and
+`payload.invitee` were the retired v1 shape, which the handler alone read, so no
+live booking could ever have converted. Stripe's `t=…,v1=…` scheme and its
+`checkout.session.completed`, `client_reference_id`, `customer_email`,
+`amount_total` and `payment_status` fields were already right.
 
-- [ ] Trigger a real Calendly webhook and confirm the signature header our
-      `verifySignedHeader` parses matches what Calendly actually sends (compare against
-      the raw body in a log, not just a `200`).
+What remains unproven is a captured payload, since documentation can still be
+wrong about a specific account's subscription version:
+
+- [ ] Trigger a real Calendly webhook and diff the raw logged body against what
+      `parseCalendlyPayload` expects (compare the body in a log, not just a `200`).
 - [ ] Book a real Calendly event with the webhook attached → deal reaches
       `meeting_booked`, and a `converted` row appears in `email_events`.
 - [ ] Cancel the event → recorded, but the stage does **not** move backwards.

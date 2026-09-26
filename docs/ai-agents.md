@@ -73,7 +73,7 @@ Current authoritative mapping:
 | `open` | prospect created | — |
 | `responded` | inbound reply classified engaged | real inbound email |
 | `negotiating` | click on the payment-link CTA | tracked CTA click (`/api/track/cta`) |
-| `meeting_booked` | Calendly `event.created` / `event.confirmed` webhook | provider callback |
+| `meeting_booked` | Calendly `invitee.created` webhook (v2; `payload.resource.email`) | provider callback |
 | `won` | Stripe `checkout.session.completed` with `payment_status=paid`, or an activated billing subscription | money moved |
 | `lost` | human decision in the UI | operator |
 

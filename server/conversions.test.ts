@@ -17,6 +17,7 @@ import {
 } from "./services/cta";
 import { buildUnsubscribeHeaders, type OutboundEmail } from "./services/email";
 import { verifySignedHeader } from "./_core/conversionWebhooks";
+import { parseCalendlyPayload, type CalendlyPayload } from "./services/conversions";
 
 describe("evidence-driven stage advancement", () => {
   it("never advances on a booking-link click", () => {
@@ -182,7 +183,11 @@ describe("List-Unsubscribe headers (RFC 8058)", () => {
 
 describe("provider webhook signature verification", () => {
   const secret = "whsec_test_secret";
-  const body = JSON.stringify({ event: "event.created", payload: { invitee: { email: "a@b.co" } } });
+  // Calendly v2 envelope: the invitee lives at payload.resource, not payload.invitee.
+  const body = JSON.stringify({
+    event: "invitee.created",
+    payload: { resource: { email: "a@b.co", status: "active" } },
+  });
 
   function sign(payload: string, timestamp: number, version = "v0", key = secret) {
     const mac = createHmac("sha256", key).update(`${timestamp}.${payload}`).digest("hex");
@@ -233,5 +238,88 @@ describe("provider webhook signature verification", () => {
     expect(verifySignedHeader("garbage", body, secret, ["v0"])).toBe(false);
     expect(verifySignedHeader(`t=notanumber,v0=${"0".repeat(64)}`, body, secret, ["v0"])).toBe(false);
     expect(verifySignedHeader(`t=${t},v0=not-hex`, body, secret, ["v0"])).toBe(false);
+  });
+});
+
+// The handler above these tests already covered signal mapping and signatures,
+// but nothing checked *where in the payload the fields sit* — so the Calendly
+// handler could read `payload.invitee.email` (retired v1) while every real v2
+// subscription sends `payload.resource.email`, and stay green. Each genuine
+// booking would have returned malformed_payload and the deal would never reach
+// meeting_booked. Parsing is pure, so it is asserted here without a database:
+// a field-path regression now fails the `checks` job rather than a sales call.
+describe("calendly payload parsing", () => {
+  const v2Booked: CalendlyPayload = {
+    event: "invitee.created",
+    event_uuid: "84g5f5e1-0000-4000-8000-000000000001",
+    payload: {
+      resource: {
+        email: "prospect@acme.test",
+        status: "active",
+        scheduled_event: { name: "Discovery Call", status: "active" },
+      },
+    },
+  };
+
+  it("reads the v2 invitee address from payload.resource", () => {
+    expect(parseCalendlyPayload(v2Booked)).toMatchObject({
+      inviteeEmail: "prospect@acme.test",
+      eventName: "Discovery Call",
+      eventStatus: "active",
+      canceled: false,
+      noShow: false,
+    });
+  });
+
+  it("still accepts the retired v1 shape", () => {
+    expect(
+      parseCalendlyPayload({
+        event: "event.created",
+        payload: { invitee: { email: "legacy@acme.test" }, event: { name: "30min" } },
+      }),
+    ).toMatchObject({
+      inviteeEmail: "legacy@acme.test",
+      eventName: "30min",
+      canceled: false,
+      noShow: false,
+    });
+  });
+
+  it("treats invitee.canceled as a withdrawal, not a booking", () => {
+    expect(
+      parseCalendlyPayload({
+        event: "invitee.canceled",
+        payload: {
+          resource: {
+            email: "prospect@acme.test",
+            status: "canceled",
+            scheduled_event: { name: "Discovery Call", status: "canceled" },
+          },
+        },
+      }),
+    ).toMatchObject({ inviteeEmail: "prospect@acme.test", canceled: true, noShow: false });
+  });
+
+  it("falls back to the event name when the resource omits a status", () => {
+    expect(
+      parseCalendlyPayload({
+        event: "invitee.canceled",
+        payload: { resource: { email: "quiet@acme.test" } },
+      }).canceled,
+    ).toBe(true);
+  });
+
+  it("flags a no-show separately so it cannot re-confirm a meeting", () => {
+    expect(
+      parseCalendlyPayload({
+        event: "invitee_no_show.created",
+        payload: { resource: { email: "absent@acme.test", status: "active" } },
+      }),
+    ).toMatchObject({ inviteeEmail: "absent@acme.test", canceled: false, noShow: true });
+  });
+
+  it("returns null rather than guessing an owner for an empty payload", () => {
+    expect(parseCalendlyPayload({}).inviteeEmail).toBeNull();
+    expect(parseCalendlyPayload({ payload: { resource: null } }).inviteeEmail).toBeNull();
   });
 });
