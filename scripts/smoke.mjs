@@ -24,6 +24,7 @@ const CALENDLY_URL = "https://calendly.com/signalflow-smoke/30min";
 const STRIPE_PAYMENT_LINK = "https://buy.stripe.com/signalflow_smoke";
 const CALENDLY_SECRET = "smoke_calendly_secret_not_real";
 const STRIPE_SECRET = "whsec_smoke_stripe_not_real";
+const INGEST_SECRET = "smoke_ingest_secret_not_real";
 
 let failures = 0;
 function check(label, passed, detail) {
@@ -42,6 +43,9 @@ async function startServer() {
     STRIPE_PAYMENT_LINK,
     CALENDLY_SIGNING_SECRET: CALENDLY_SECRET,
     STRIPE_WEBHOOK_SECRET: STRIPE_SECRET,
+    // Set explicitly rather than inherited: the SES checks below assert a
+    // refusal, and an empty or shell-inherited value would change its meaning.
+    REPLY_INGEST_SECRET: INGEST_SECRET,
   };
   // Several checks below assert that a provider must be asked to *retry* when we
   // cannot persist. A database inherited from the shell would silently turn those
@@ -67,12 +71,30 @@ async function startServer() {
     await new Promise((r) => setTimeout(r, 250));
   }
   console.error("Server never became ready. Output:\n" + output);
-  child.kill();
+  await stopServer(child);
   process.exit(1);
 }
 
 function sign(secret, timestamp, body, version) {
   return `t=${timestamp},${version}=${createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex")}`;
+}
+
+/**
+ * Kill the server child and resolve only once its stdio has actually closed.
+ *
+ * Exiting while those handles are still being torn down trips a libuv
+ * assertion on Windows (`UV_HANDLE_CLOSING`, src\win\async.c) and aborts the
+ * process with a non-zero status *after* every check has printed "ok" — which
+ * inverts the result for anything reading the exit code. The Linux runner never
+ * shows this, so it would otherwise be trusted as a passing run locally and a
+ * failing one elsewhere, or the reverse.
+ */
+function stopServer(child) {
+  return new Promise((resolve) => {
+    if (!child || child.exitCode !== null) return resolve();
+    child.once("close", resolve);
+    child.kill();
+  });
 }
 
 async function main() {
@@ -178,6 +200,54 @@ async function main() {
   });
   check("Stripe callback with a mismatched signature is rejected", stripe.status === 401, String(stripe.status));
 
+  // ── SES/SNS inbound authentication ──────────────────────────────────────
+  // SNS cannot carry an HMAC of our choosing, so this route is keyed by a
+  // capability in the subscription URL. It previously accepted any well-formed
+  // body, which let anyone forge a `replied`/`bounced` event into a deal.
+  const forgedSes = JSON.stringify({
+    Type: "Notification",
+    Message: JSON.stringify({
+      notificationType: "Received",
+      mail: {
+        messageId: "forged",
+        source: "attacker@example.test",
+        destination: ["reply+ref_smoke@your.domain"],
+      },
+      content: "I want to buy",
+    }),
+  });
+  const sesNoKey = await post("/api/replies/webhook/ses", forgedSes);
+  check(
+    "SES inbound with no key is refused",
+    sesNoKey.status === 401,
+    String(sesNoKey.status),
+  );
+  const sesWrongKey = await post("/api/replies/webhook/ses?key=not_the_secret", forgedSes);
+  check(
+    "SES inbound with a wrong key is refused",
+    sesWrongKey.status === 401,
+    String(sesWrongKey.status),
+  );
+
+  // Correct key but no database: must answer 500 and keep serving. This used to
+  // throw out of the async handler, and Express does not catch async rejections
+  // — the unhandled rejection ended the process, so a database blip turned into
+  // a crash loop driven by the provider's own retries.
+  const sesValidKey = await post(`/api/replies/webhook/ses?key=${INGEST_SECRET}`, forgedSes);
+  check(
+    "SES inbound that cannot persist asks the provider to retry instead of crashing",
+    sesValidKey.status === 500,
+    String(sesValidKey.status),
+  );
+  const survivors = await fetch(`${BASE}/api/health`)
+    .then((r) => r.json())
+    .catch(() => null);
+  check(
+    "server is still alive after a failed ingest",
+    survivors?.ok === true,
+    JSON.stringify(survivors),
+  );
+
   // ── One-click unsubscribe (RFC 8058) ───────────────────────────────────────
   const oneClick = await fetch(`${BASE}/api/replies/unsubscribe?ref=does_not_exist`, {
     method: "POST",
@@ -197,7 +267,7 @@ async function main() {
     String(landing.status),
   );
 
-  child.kill();
+  await stopServer(child);
   console.log(`\n${failures === 0 ? "smoke: all checks passed" : `smoke: ${failures} check(s) FAILED`}`);
   process.exit(failures === 0 ? 0 : 1);
 }

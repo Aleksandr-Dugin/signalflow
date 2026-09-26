@@ -61,7 +61,10 @@ date and the outcome in the PR that enables autopilot.
 
 - [ ] Configure the ESP's inbound webhook to `POST /api/replies/webhook/<provider>`
       with `REPLY_INGEST_SECRET` set, then reply to a sent message from the prospect
-      mailbox.
+      mailbox. SES arrives via SNS, which cannot carry an HMAC of our choosing, so
+      register the subscription as `/api/replies/webhook/ses?key=<secret>` — that
+      proves the sender holds the secret but **not** that Amazon sent the request;
+      SNS certificate verification is still to be implemented.
 - [ ] A row appears in `email_events` for that workspace with `eventType = "replied"`,
       `bodyText` = the full original body, and a non-null `classification`.
 - [ ] Reply with "I'm not interested" → prospect becomes `not_interested` and **no**
@@ -69,6 +72,11 @@ date and the outcome in the PR that enables autopilot.
 - [ ] Reply with "unsubscribe" → prospect suppressed, no follow-up queued.
 - [ ] Send the same webhook payload twice → second call returns `duplicate: true`
       and produces no second classification or job.
+- [ ] Stop MySQL, then deliver a correctly-authenticated webhook: the endpoint must
+      answer `500` and the server must **stay up**. It used to throw out of an async
+      handler, which Express does not catch, so the unhandled rejection killed the
+      process and the provider's retry killed the replacement — one database blip
+      became a crash loop. `pnpm smoke` asserts this shape without a database.
 - [ ] With `CALENDLY_URL`/`STRIPE_PAYMENT_LINK` set, the URL inside a delivered
       message points at `/api/track/cta/<ref>/<kind>`, and clicking it lands on the
       real Calendly/Stripe page (`server/services/cta.ts`).

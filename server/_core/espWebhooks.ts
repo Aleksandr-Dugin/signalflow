@@ -51,6 +51,29 @@ function verifyPostmark(req: Request): boolean {
   return Boolean(secret) && safeEqualHex(String(secret), env.replyIngestSecret);
 }
 
+/**
+ * Authenticate an SNS-delivered SES event.
+ *
+ * Unlike the other three providers this route previously had no check at all,
+ * which made it an unauthenticated write endpoint into the sales funnel: anyone
+ * who knew the URL could post a forged `replied` or `bounced` event, advance or
+ * kill another tenant's deal, and queue follow-ups. SNS cannot attach a custom
+ * header or HMAC of our choosing, so the credential rides in the subscription
+ * URL — register the endpoint as
+ * `https://your.app/api/replies/webhook/ses?key=<REPLY_INGEST_SECRET>` and the
+ * `?key=` (or `x-ses-webhook-key`) is compared in constant time.
+ *
+ * This is a capability check, not proof of origin: full SNS signature
+ * verification (fetch SigningCertUrl, pin it to *.sns.<region>.amazonaws.com,
+ * RSA-SHA1 over the canonical string) is still outstanding. What is no longer
+ * possible is accepting these events with no credential whatsoever.
+ */
+function verifySes(req: Request): boolean {
+  if (!env.replyIngestSecret) return false;
+  const provided = String(req.query?.key ?? "") || String(req.header("x-ses-webhook-key") ?? "");
+  return Boolean(provided) && safeEqualHex(provided, env.replyIngestSecret);
+}
+
 /** Amazon SES → SNS subscription confirmation + notification body.
  *  We only parse the JSON notification for simplicity; production deployments
  *  should also validate the SNS signature (SignCertUrl chain). */
@@ -117,45 +140,72 @@ function parseGenericInbound(body: any): InboundEmailInput {
   };
 }
 
-export function mountEspWebhooks(app: Express): void {
-  const reply = (res: Response, err?: unknown) => {
-    if (err) {
-      console.error("[esp-webhook]", err);
-      return res.status(500).json({ ok: false });
-    }
-    res.json({ ok: true });
-  };
+/**
+ * Run an inbound handler and translate the outcome into a status providers
+ * understand.
+ *
+ * ingestEmailEvent() throws when the database is unreachable, and Express does
+ * not catch async rejections — so until now a webhook arriving during a
+ * database blip produced an unhandled rejection and terminated the Node
+ * process. The provider sees a reset connection and retries, and the retry
+ * kills it again: one blip becomes a crash loop, and every other tenant's
+ * traffic goes down with it. A 500 asks for the same retry without taking the
+ * server with it, which is the contract the Calendly/Stripe callbacks in
+ * conversionWebhooks.ts already honour.
+ */
+async function ingest(res: Response, run: () => Promise<void>): Promise<void> {
+  try {
+    await run();
+    if (!res.headersSent) res.json({ ok: true });
+  } catch (err) {
+    console.error("[esp-webhook]", err);
+    if (!res.headersSent) res.status(500).json({ ok: false, reason: "ingest_failed" });
+  }
+}
 
+export function mountEspWebhooks(app: Express): void {
   app.post("/api/replies/webhook/mailgun", async (req, res) => {
     if (!(await verifyMailgun(req))) return res.status(401).json({ ok: false, reason: "bad signature" });
     const input = parseGenericInbound(req.body);
-    await ingestEmailEvent(input);
-    reply(res);
+    await ingest(res, async () => {
+      await ingestEmailEvent(input);
+    });
   });
 
   app.post("/api/replies/webhook/sendgrid", async (req, res) => {
     if (!verifySendGrid(req)) return res.status(401).json({ ok: false, reason: "bad auth" });
     const input = parseGenericInbound(req.body);
-    const result = await ingestEmailEvent(input);
-    // Auto-handle List-Unsubscribe links that come through SendGrid parse.
-    if (/^unsubscribe$/i.test(input.bodyText ?? "") && input.referenceId) {
-      await handleUnsubscribeByRef(input.referenceId);
-    }
-    reply(res);
-    void result;
+    await ingest(res, async () => {
+      await ingestEmailEvent(input);
+      // Auto-handle List-Unsubscribe links that come through SendGrid parse.
+      if (/^unsubscribe$/i.test(input.bodyText ?? "") && input.referenceId) {
+        await handleUnsubscribeByRef(input.referenceId);
+      }
+    });
   });
 
   app.post("/api/replies/webhook/postmark", async (req, res) => {
     if (!verifyPostmark(req)) return res.status(401).json({ ok: false, reason: "bad secret" });
     const input = parseGenericInbound(req.body);
-    await ingestEmailEvent(input);
-    reply(res);
+    await ingest(res, async () => {
+      await ingestEmailEvent(input);
+    });
   });
 
   app.post("/api/replies/webhook/ses", async (req, res) => {
+    // Fail closed with 503 when the secret is unset so a half-configured
+    // deployment cannot silently ingest forged mail events, matching the
+    // contract the Calendly/Stripe callbacks already honour.
+    if (!env.replyIngestSecret) {
+      return res.status(503).json({ ok: false, reason: "REPLY_INGEST_SECRET not set" });
+    }
+    if (!verifySes(req)) {
+      return res.status(401).json({ ok: false, reason: "bad key" });
+    }
     const input = parseSes(req);
     if (!input) return res.status(204).end();
-    await ingestEmailEvent(input);
-    reply(res);
+    await ingest(res, async () => {
+      await ingestEmailEvent(input);
+    });
   });
 }
