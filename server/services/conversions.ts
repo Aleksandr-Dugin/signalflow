@@ -207,6 +207,37 @@ export interface StripeEvent {
 }
 
 /**
+ * Resolve which outreach a Stripe checkout belongs to. Prefers the
+ * `client_reference_id` stamped on a server-created Checkout Session, and falls
+ * back to the payer's email through the same ambiguity-guarded lookup used for
+ * inbound replies — a Payment Link is one static URL and cannot carry metadata.
+ *
+ * Both the stage transition and the deal value must go through this one
+ * resolver. When applyStripeValue understood only `client_reference_id`, every
+ * Payment Link purchase advanced the deal to `won` while writing valueCents = 0,
+ * so the funnel reported closed revenue as zero. Caught by the first real run of
+ * server/integration.test.ts against MySQL.
+ */
+async function resolveStripeOwner(
+  db: Db,
+  session: StripeCheckoutSession,
+): Promise<{ workspaceId: string; prospectId: string; outreachId: string } | null> {
+  const ref = session?.client_reference_id ?? null;
+  if (ref) {
+    const [msg] = await db
+      .select()
+      .from(schema.outreachMessages)
+      .where(eq(schema.outreachMessages.referenceId, ref))
+      .limit(1);
+    return msg
+      ? { workspaceId: msg.workspaceId, prospectId: msg.prospectId, outreachId: msg.id }
+      : null;
+  }
+  const address = session?.customer_email ?? null;
+  return address ? ownerFromAddress(db, address) : null;
+}
+
+/**
  * Stripe `checkout.session.completed` / `checkout.session.async_payment_succeeded`
  * with payment_status=paid -> won. Anything else is stored for the timeline only.
  *
@@ -225,21 +256,7 @@ export async function handleStripeEvent(event: StripeEvent): Promise<ConversionO
   if (!type || !session) return { handled: false, reason: "malformed_payload" };
 
   const address = session.customer_email ?? null;
-  const ref = session.client_reference_id ?? null;
-  const owner = ref
-    ? await (async () => {
-        const [msg] = await db
-          .select()
-          .from(schema.outreachMessages)
-          .where(eq(schema.outreachMessages.referenceId, ref))
-          .limit(1);
-        return msg
-          ? { workspaceId: msg.workspaceId, prospectId: msg.prospectId, outreachId: msg.id }
-          : null;
-      })()
-    : address
-      ? await ownerFromAddress(db, address)
-      : null;
+  const owner = await resolveStripeOwner(db, session);
   if (!owner) return { handled: false, reason: "unmatched_payer" };
 
   const paid = session.payment_status === "paid";
@@ -263,31 +280,30 @@ export async function handleStripeEvent(event: StripeEvent): Promise<ConversionO
   });
 }
 
-/** Value captured by a paid checkout, in minor units — feeds opportunity.valueCents. */
+/**
+ * Value captured by a paid checkout, in minor units — feeds opportunity.valueCents.
+ * Restricted to payment_status "paid": an abandoned or still-open Checkout also
+ * carries an amount_total, and recording that as closed revenue would inflate the
+ * pipeline with money that was never received.
+ */
 export async function applyStripeValue(event: StripeEvent): Promise<void> {
   const db = getDb();
   if (!db) return;
   const session = event?.data?.object;
+  if (session?.payment_status !== "paid") return;
   const amount = session?.amount_total;
-  const ref = session?.client_reference_id ?? null;
   if (typeof amount !== "number" || amount <= 0) return;
-  if (ref) {
-    const [msg] = await db
-      .select()
-      .from(schema.outreachMessages)
-      .where(eq(schema.outreachMessages.referenceId, ref))
-      .limit(1);
-    if (!msg) return;
-    await db
-      .update(schema.opportunities)
-      .set({ valueCents: amount })
-      .where(
-        and(
-          eq(schema.opportunities.workspaceId, msg.workspaceId),
-          eq(schema.opportunities.prospectId, msg.prospectId),
-        ),
-      );
-  }
+  const owner = await resolveStripeOwner(db, session);
+  if (!owner) return;
+  await db
+    .update(schema.opportunities)
+    .set({ valueCents: amount })
+    .where(
+      and(
+        eq(schema.opportunities.workspaceId, owner.workspaceId),
+        eq(schema.opportunities.prospectId, owner.prospectId),
+      ),
+    );
 }
 
 /** Human-readable target for a tracked click, resolved from config only. */

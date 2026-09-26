@@ -336,6 +336,39 @@ suite("autonomous loop against a real database", () => {
     expect(prospect!.status).toBe("won");
   });
 
+  it("does not record deal value for a checkout that was never paid", async () => {
+    // Runs after the funnel walk, which leaves the deal at won / 4900. An
+    // abandoned Checkout still carries amount_total, so recording it would
+    // inflate closed revenue with money that never arrived.
+    const [before] = await db!
+      .select({ valueCents: schema.opportunities.valueCents })
+      .from(schema.opportunities)
+      .where(eq(schema.opportunities.prospectId, prospectId))
+      .limit(1);
+    expect(before!.valueCents).toBe(4900);
+
+    await applyStripeValue({
+      id: `evt_open_${run}`,
+      type: "checkout.session.created",
+      data: {
+        object: {
+          id: `cs_open_${run}`,
+          customer_email: email,
+          payment_status: "open",
+          amount_total: 999_999,
+          currency: "usd",
+        },
+      },
+    });
+
+    const [after] = await db!
+      .select({ valueCents: schema.opportunities.valueCents })
+      .from(schema.opportunities)
+      .where(eq(schema.opportunities.prospectId, prospectId))
+      .limit(1);
+    expect(after!.valueCents).toBe(4900);
+  });
+
   it("treats a replayed provider webhook as inert", async () => {
     const replay = await handleStripeEvent({
       id: `evt_${run}`,
