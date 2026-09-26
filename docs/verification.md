@@ -22,12 +22,17 @@ What CI already covers (`.github/workflows/ci.yml`):
   answers `503` so the provider retries instead of losing the signal, and both the
   one-click `POST` and the `GET` landing page of the unsubscribe route work.
 
-> **Caveat on the integration suite.** `pnpm smoke` was run and passes (12/12) against
-> the live server. `server/integration.test.ts` has *not* been executed against a real
-> MySQL anywhere yet — the development machine has no container runtime, so locally it
-> only ever hits its own `describe.skip` branch. The CI `integration` job is its first
-> real run: treat an initial failure there as unfinished wiring rather than a regression,
-> and treat the first green as validation of the tests themselves.
+> **Status: executed and green.** CI run #3
+> (`161b133`) passed both jobs on real MySQL 8: migrations applied from the
+> baseline journal, and the integration suite ran to completion. The
+> `REQUIRE_INTEGRATION_TESTS` flag set in the integration job is what makes that
+> statement meaningful — without it the suite could have reported success from 9
+> silent skips, which is exactly how run #1 nearly fooled us. Two real bugs were
+> found by this suite on its first execution: the `CI`-scoped skip guard breaking
+> the `checks` job, and `applyStripeValue` writing `valueCents = 0` for every
+> Stripe Payment Link sale. Run `pnpm smoke` also passes locally and on the
+> runner. What remains genuinely unverified is everything below, which no
+> container can cover.
 
 ## Must verify live
 
