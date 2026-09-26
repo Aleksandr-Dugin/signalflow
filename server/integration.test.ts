@@ -21,6 +21,23 @@ import { ingestEmailEvent } from "./services/replies";
 import { handleCalendlyEvent, handleStripeEvent, applyStripeValue, recordCtaClick } from "./services/conversions";
 
 const databaseConfigured = Boolean(process.env.DATABASE_URL);
+
+if (!databaseConfigured) {
+  if (process.env.CI) {
+    // Fail loudly rather than exiting 0 from a skip. A green CI job that silently
+    // omitted the only database-backed tests would *claim* the autonomous loop was
+    // verified when nothing ran — strictly worse than a red one, and the exact
+    // failure mode this suite exists to close.
+    throw new Error(
+      "CI must provide DATABASE_URL for server/integration.test.ts to run. " +
+        "Refusing to report success from a skipped integration suite — check the " +
+        "env block of the integration job in .github/workflows/ci.yml.",
+    );
+  }
+  console.warn(
+    "[integration] DATABASE_URL unset — skipping the 8 database-backed tests.",
+  );
+}
 const suite = databaseConfigured ? describe : describe.skip;
 
 /** Everything is namespaced by this suffix so concurrent/repeated runs cannot collide. */
