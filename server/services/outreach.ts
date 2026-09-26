@@ -5,6 +5,7 @@ import { getDb } from "../_core/database";
 import { env } from "../_core/env";
 import { enforceFeature, enforceLimit, monthlyUsageCount, recordUsage } from "./entitlements";
 import { getEmailProvider, type SendResult } from "./email";
+import { ctaLinksFromConfig, trackCtaLinks } from "./cta";
 import { canonicalDomain } from "./providers";
 
 export class OutreachError extends Error {
@@ -96,6 +97,19 @@ export async function sendOutreachEmail(
 
   const referenceId = nanoid(16);
 
+  // Swap the bare Calendly/Stripe URLs for per-message tracked links. Done here
+  // rather than at draft time because `referenceId` is what makes a click
+  // attributable, and it is stored in `body` so the record matches what the
+  // prospect actually received.
+  const trackedBody = trackCtaLinks(input.body, {
+    publicUrl: env.publicUrl,
+    referenceId,
+    links: ctaLinksFromConfig({
+      calendlyUrl: env.calendlyUrl,
+      stripePaymentLink: env.stripePaymentLink,
+    }),
+  });
+
   // Idempotent insert: a retried send with the same key never double-emails.
   const outreachId = nanoid();
   const inserted = await db
@@ -108,7 +122,7 @@ export async function sendOutreachEmail(
       recipientEmail: email,
       recipientName: toName,
       subject: input.subject,
-      body: input.body,
+      body: trackedBody,
       status: "sending",
       personalizationId: input.personalizationId ?? null,
       idempotencyKey: input.idempotencyKey,
@@ -150,7 +164,7 @@ export async function sendOutreachEmail(
       toName,
       toEmail: email,
       subject: input.subject,
-      text: input.body,
+      text: trackedBody,
       referenceId,
       unsubscribeUrl: unsubscribeUrl(referenceId),
     });

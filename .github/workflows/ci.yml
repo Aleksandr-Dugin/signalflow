@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Integration tests provision a MySQL container, so the autonomous loop
+# (outreach -> reply -> follow-up job -> conversion -> stage) is finally executed
+# end to end rather than only in pure unit mocks. See docs/verification.md for the
+# parts a container cannot cover (real SMTP, real provider webhooks).
+
+jobs:
+  checks:
+    name: Typecheck, unit tests, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.4.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm check
+
+      # DATABASE_URL is deliberately absent: the integration suite skips itself and
+      # the rest must still pass, which is what keeps `pnpm test` usable offline.
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      # Proves the HTTP wiring, not the logic: that the funnel's unauthenticated
+      # endpoints are actually mounted before the /api catch-all, that forged or
+      # replayed provider signatures are refused at the edge, and that a CTA
+      # redirect cannot be pointed at an attacker host. Runs without a database on
+      # purpose — the integration job covers the durable behaviour.
+      - name: Smoke test (live HTTP routes)
+        run: pnpm smoke
+
+  integration:
+    name: Integration tests (real MySQL)
+    runs-on: ubuntu-latest
+    needs: checks
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: signalflow
+          MYSQL_USER: signalflow
+          MYSQL_PASSWORD: signalflow
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u signalflow -psignalflow"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      DATABASE_URL: mysql://signalflow:signalflow@127.0.0.1:3306/signalflow
+      JWT_SECRET: ci-only-not-a-real-secret-value
+      PUBLIC_APP_URL: http://localhost:3000
+      # Configure the CTA tools so the tracked-link rewrite path is exercised
+      # instead of skipped.
+      CALENDLY_URL: https://calendly.com/acme-test/30min
+      STRIPE_PAYMENT_LINK: https://buy.stripe.com/test_ci_placeholder
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.4.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Fails loudly if schema.ts and drizzle/ disagree — the drift class that
+      # this repo's missing migration journal used to hide.
+      - name: Verify migration history is intact
+        run: pnpm drizzle-kit check
+
+      - name: Apply migrations
+        run: pnpm db:migrate
+
+      - name: Integration + unit tests
+        run: pnpm test

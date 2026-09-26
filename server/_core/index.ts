@@ -29,6 +29,8 @@ import {
 import { ingestEmailEvent, handleUnsubscribeByRef } from "../services/replies";
 import { startJobWorker, stopJobWorker } from "../services/jobs";
 import { mountEspWebhooks } from "./espWebhooks";
+import { mountConversionEndpoints } from "./conversionWebhooks";
+import { assertSchemaReady } from "./schemaCheck";
 // Side-effect import: registers "reply.followup" and "campaign.discovery" onto
 // the job worker so autonomous AI follow-up and scheduled discovery actually run.
 import "../services/jobHandlers";
@@ -241,6 +243,9 @@ app.get("/api/replies/unsubscribe", async (req, res) => {
 // Mailgun / SendGrid / Postmark / SES native inbound webhooks.
 mountEspWebhooks(app);
 
+// Tracked CTA redirects + Calendly / Stripe conversion callbacks.
+mountConversionEndpoints(app);
+
 // ── tRPC ────────────────────────────────────────────────────────────────────
 app.use(
   "/api/trpc",
@@ -277,7 +282,12 @@ async function start() {
   await attachClient(app);
   httpServer.listen(env.port, () => {
     console.log(`SignalFlow listening on http://localhost:${env.port} (${env.nodeEnv})`);
-    if (getDb()) startJobWorker();
+    if (getDb()) {
+      // Loud rather than mysterious: a database built from the loose SQL files in
+      // drizzle/ can be missing columns schema.ts assumes (see docs/database.md).
+      void assertSchemaReady();
+      startJobWorker();
+    }
   });
 }
 

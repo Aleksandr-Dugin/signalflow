@@ -3,10 +3,7 @@
 // "AI SDR agent" pattern used by SalesGPT and b2b-sdr-agent-template: an event
 // (inbound reply, timer, campaign creation) turns into an AI-written draft that
 // is then sent through the same idempotent outreach pipeline a human would use.
-import { getDb } from "../_core/database";
 import { env } from "../_core/env";
-import { eq } from "drizzle-orm";
-import * as schema from "../../drizzle/schema";
 import { enqueueJob, registerJob } from "./jobs";
 import { generatePersonalization, getProspectThread, runDiscovery } from "../db";
 import { makeIdempotencyKey, sendOutreachEmail } from "./outreach";
@@ -17,9 +14,12 @@ registerJob("reply.followup", async (payload: any, job) => {
   if (!prospectId) throw new Error("reply.followup: missing prospectId");
 
   // 1) Pull the thread so the AI writer sees prior turns (SalesGPT-style
-  //    conversation memory).
+  //    conversation memory). Funnel events (CTA clicks, Calendly/Stripe
+  //    confirmations) share this table but carry no message body — including
+  //    them would only feed the model blank "Prospect:" lines.
   const thread = await getProspectThread(job.workspaceId, prospectId, 10);
   const history = thread
+    .filter((m) => (m.body ?? "").trim().length > 0)
     .map((m) => `${m.direction === "inbound" ? "Prospect" : "Us"}: ${(m.body ?? "").slice(0, 500)}`)
     .join("\n")
     .slice(-3500);
@@ -44,24 +44,10 @@ registerJob("reply.followup", async (payload: any, job) => {
     idempotencyKey: makeIdempotencyKey(job.workspaceId, prospectId, draft.id ?? null),
   });
 
-  // 4) Advance the opportunity a stage — from "responded" to "meeting_booked"
-  //    on the first follow-up we send. Terminal stages are guarded by the
-  //    opportunity service.
-  const db = getDb();
-  if (db) {
-    const [opp] = await db
-      .select()
-      .from(schema.opportunities)
-      .where(eq(schema.opportunities.prospectId, prospectId))
-      .limit(1);
-    if (opp && opp.stage === "responded") {
-      await db
-        .update(schema.opportunities)
-        .set({ stage: "meeting_booked" })
-        .where(eq(schema.opportunities.id, opp.id));
-    }
-  }
-
+  // NOTE: deliberately no stage update here. Sending our own follow-up is an
+  // action *we* took, not a fact about the prospect, and using it to move a deal
+  // to "meeting_booked" reported appointments that did not exist. Stages advance
+  // only on external evidence — see services/conversions.ts + docs/ai-agents.md.
   return { outreachId: result.outreachId, status: result.status, personalizationId: draft.id };
 });
 

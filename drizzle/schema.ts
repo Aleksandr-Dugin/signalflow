@@ -437,6 +437,12 @@ export const outreachMessages = mysqlTable(
 );
 
 // ── Email events / replies (full original body preserved, audit P1) ───────────
+// Lifecycle log. Beyond mail traffic it also carries funnel evidence written by
+// the conversion callbacks (docs/ai-agents.md):
+//   clicked   - prospect followed a tracked CTA link (see services/cta.ts)
+//   converted - an external system confirmed an outcome; `classification` keeps
+//               the provider event name (calendly.event.created, stripe.
+//               checkout.session.completed, ...) and `metadata` the raw payload
 export const emailEvents = mysqlTable(
   "email_events",
   {
@@ -455,7 +461,9 @@ export const emailEvents = mysqlTable(
       "delivered",
       "bounced",
       "opened",
+      "clicked",
       "replied",
+      "converted",
       "unsubscribed",
       "failed",
     ]).notNull(),

@@ -97,3 +97,42 @@ export function canAdvanceStage(from: OpportunityStage, to: OpportunityStage): b
   if (to === "won" || to === "lost") return true;
   return STAGE_ORDER.indexOf(to) > STAGE_ORDER.indexOf(from);
 }
+
+// ── Evidence-driven stage advancement (docs/ai-agents.md) ────────────────────
+// A stage may only be entered when an external fact proves it happened. Nothing
+// here fires because *we* performed an action (sent a mail, ran a job) — that is
+// our own activity, not the prospect's, and using it inflated the funnel.
+export type ConversionSignal =
+  | "cta_clicked:booking"
+  | "cta_clicked:payment"
+  | "meeting_confirmed"
+  | "payment_captured";
+
+const SIGNAL_TARGET: Record<ConversionSignal, OpportunityStage | null> = {
+  // Opening the scheduler is intent, not an appointment. Recorded, never promoted.
+  "cta_clicked:booking": null,
+  // Engaging the checkout link is a commercial conversation. Real click, real intent.
+  "cta_clicked:payment": "negotiating",
+  // Calendly told us an event exists.
+  meeting_confirmed: "meeting_booked",
+  // Money moved.
+  payment_captured: "won",
+};
+
+/** The stage a signal authorises, or null when it carries no stage implication. */
+export function stageForSignal(signal: ConversionSignal): OpportunityStage | null {
+  return SIGNAL_TARGET[signal] ?? null;
+}
+
+/**
+ * Resolve the stage to write for a signal, or null for "leave it alone". Never
+ * regresses and never resurrects a terminal deal, so replayed webhooks are inert.
+ */
+export function applySignal(
+  current: OpportunityStage,
+  signal: ConversionSignal,
+): OpportunityStage | null {
+  const target = stageForSignal(signal);
+  if (!target) return null;
+  return canAdvanceStage(current, target) ? target : null;
+}

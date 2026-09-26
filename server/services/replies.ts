@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import * as schema from "../../drizzle/schema";
 import { getDb } from "../_core/database";
@@ -30,24 +30,56 @@ export interface InboundResult {
 
 const POSITIVE_LABELS: ReplyLabel[] = ["positive", "interested"];
 
-async function resolveOutreach(
+/**
+ * Find the outbound message an inbound event belongs to. Exported because the
+ * conversion callbacks (Calendly invitee / Stripe payer) resolve ownership by
+ * email address through exactly the same ambiguity guard.
+ */
+export async function resolveOutreach(
   db: NonNullable<ReturnType<typeof getDb>>,
   input: InboundEmailInput,
 ) {
+  // When the caller already knows the tenant, every lookup is hard-scoped to it.
+  const scope = input.workspaceId
+    ? [eq(schema.outreachMessages.workspaceId, input.workspaceId)]
+    : [];
+
   if (input.referenceId) {
     const [byRef] = await db
       .select()
       .from(schema.outreachMessages)
-      .where(eq(schema.outreachMessages.referenceId, input.referenceId))
+      .where(and(...scope, eq(schema.outreachMessages.referenceId, input.referenceId)))
       .limit(1);
     if (byRef) return byRef;
   }
-  // Fall back to matching the recipient address within the workspace.
+
+  // Fall back to the recipient address. Many ESPs drop our custom X-SignalFlow-Ref
+  // header and never use plus-addressing, so this is often the only handle. A
+  // recipient address is *not* unique across tenants though: two workspaces that
+  // both emailed jane@acme.co would let one workspace's reply be attributed to a
+  // message belonging to the other, leaking prospect data across the boundary.
+  // So the fallback is accepted only when the address has exactly one owner.
   const email = input.fromAddress.toLowerCase();
+  const owners = await db
+    .selectDistinct({ workspaceId: schema.outreachMessages.workspaceId })
+    .from(schema.outreachMessages)
+    .where(and(...scope, eq(schema.outreachMessages.recipientEmail, email)))
+    .limit(2);
+  if (owners.length === 0) return null;
+  if (owners.length > 1) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[replies] inbound from "${email}" maps to multiple workspaces; refusing to attribute.`,
+    );
+    return null;
+  }
+
+  // Newest message wins: a reply answers the most recent thing we sent.
   const rows = await db
     .select()
     .from(schema.outreachMessages)
-    .where(eq(schema.outreachMessages.recipientEmail, email))
+    .where(and(...scope, eq(schema.outreachMessages.recipientEmail, email)))
+    .orderBy(desc(schema.outreachMessages.createdAt))
     .limit(1);
   return rows[0] ?? null;
 }

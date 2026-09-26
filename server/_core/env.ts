@@ -59,6 +59,9 @@ export const env = {
   smtpUser: str("SMTP_USER"),
   smtpPassword: str("SMTP_PASSWORD"),
   smtpFrom: str("SMTP_FROM", "SignalFlow <no-reply@localhost>"),
+  // Must be a mailbox that can actually receive replies. Also powers the mailto
+  // leg of the RFC 8058 List-Unsubscribe header.
+  smtpReplyTo: str("SMTP_REPLY_TO"),
   replyIngestSecret: str("REPLY_INGEST_SECRET"),
 
   // Billing
@@ -74,6 +77,11 @@ export const env = {
   // simply omits the link from follow-up drafts.
   calendlyUrl: str("CALENDLY_URL"),
   stripePaymentLink: str("STRIPE_PAYMENT_LINK"),
+  // Signing secrets for the conversion callbacks that move a deal to
+  // meeting_booked / won. Unset => that endpoint refuses every request, so a
+  // half-configured deployment can never be tricked into reporting closed deals.
+  calendlySigningSecret: str("CALENDLY_SIGNING_SECRET"),
+  stripeWebhookSecret: str("STRIPE_WEBHOOK_SECRET"),
 
   // Discovery re-check cadence. When >0 the job worker re-enqueues discovery
   // for active campaigns on that interval (a lightweight cron).

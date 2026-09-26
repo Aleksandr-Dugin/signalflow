@@ -31,6 +31,24 @@ function buildTextBody(email: OutboundEmail): string {
   return `${email.text}\n\n—\nNo longer want to hear from us? Reply "unsubscribe" or use: ${email.unsubscribeUrl}`;
 }
 
+/**
+ * RFC 8058 unsubscribe headers. Gmail and Yahoo require a one-click
+ * `List-Unsubscribe` on bulk mail as a deliverability precondition; a plain text
+ * footer link alone is not enough. Both URIs are offered so clients that cannot
+ * POST still have the mailto route.
+ */
+export function buildUnsubscribeHeaders(
+  email: OutboundEmail,
+): Record<string, string> | undefined {
+  if (!email.unsubscribeUrl) return undefined;
+  const uris = [`<${email.unsubscribeUrl}>`];
+  if (env.smtpReplyTo) uris.push(`<mailto:${env.smtpReplyTo}?subject=unsubscribe>`);
+  return {
+    "List-Unsubscribe": uris.join(", "),
+    "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+  };
+}
+
 class SmtpEmailProvider implements EmailProvider {
   readonly name = "smtp" as const;
   private transporter: Transporter;
@@ -48,10 +66,14 @@ class SmtpEmailProvider implements EmailProvider {
     const info = await this.transporter.sendMail({
       from: env.smtpFrom,
       to: `"${email.toName}" <${email.toEmail}>`,
+      replyTo: env.smtpReplyTo || undefined,
       subject: email.subject,
       text: buildTextBody(email),
       html: email.html,
-      headers: email.referenceId ? { "X-SignalFlow-Ref": email.referenceId } : undefined,
+      headers: {
+        ...(email.referenceId ? { "X-SignalFlow-Ref": email.referenceId } : {}),
+        ...buildUnsubscribeHeaders(email),
+      },
     });
     return {
       provider: "smtp",
