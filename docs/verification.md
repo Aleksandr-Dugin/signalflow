@@ -12,8 +12,15 @@ What CI already covers (`.github/workflows/ci.yml`):
   container: baseline migration matches `schema.ts`, outreach send + idempotent retry,
   reply ingest → classification → opportunity → follow-up job claimed and completed by
   the worker, the full CTA → Calendly → Stripe walk to `won`, webhook replay inertness,
-  the cross-tenant address-collision refusal, and the master autonomy switch holding a
-  queued job, blocking new queuing, surviving a read-back, and releasing on resume.
+  the cross-tenant address-collision refusal, the master autonomy switch holding a
+  queued job, blocking new queuing, surviving a read-back, and releasing on resume,
+  and the contact search refusing a prospect that belongs to another workspace.
+- Contact selection itself is pure string work and is covered by `server/contacts.test.ts`
+  against fixture markdown: no fabricated address can appear, `noreply@`/asset
+  filenames/documentation placeholders are refused, role mailboxes rank last instead of
+  being dropped, page-printed names win over names guessed from the local part, and the
+  page walk stops as soon as it has a named company-domain contact (and returns nothing
+  at all for demo companies).
 - `pnpm build` — Vite client bundle + esbuild server bundle.
 - `pnpm smoke` (`scripts/smoke.mjs`) — boots the real server with no database and
   asserts the HTTP edge: tracked CTA clicks redirect to the configured Calendly/Stripe
@@ -139,6 +146,25 @@ wrong about a specific account's subscription version:
       is written). Covered in CI; re-check on production data volumes.
 - [ ] A non-admin session cannot reach any `admin.*` tRPC procedure, and cannot read
       another workspace's prospects by guessing ids.
+
+### 7. Contact discovery
+
+The selection rules are unit-tested; what no test can prove is that a real company
+website produces a real, correctly-attributed address rather than nothing.
+
+- [ ] Run discovery on a known company whose team page prints an email. Confirm the
+      `contacts` row has that exact address, a `sourceUrl` that opens on the page
+      printing it, and a name the company actually published — not a plausible guess.
+- [ ] Run it on a site that publishes only `hello@`. The contact must be stored with an
+      empty name (the draft then greets generically), never with "Hello" as a person.
+- [ ] Run it on a site with no published address. Discovery must still complete and the
+      prospect must simply have no contact — a failed enrichment may not lose the run.
+- [ ] Click "Search their site" on a prospect five times in ten minutes: the sixth must
+      be refused with a rate-limit message, not silently spend more scraper credits.
+- [ ] Confirm a demo/free-plan workspace can never trigger a search (the button is not
+      offered, and `contact.enrich` refuses server-side).
+- [ ] Check `MAX_CONTACT_ENRICHMENTS` in the logs: a run of 20 candidates must not
+      scrape more than the configured number of companies.
 
 ## Known limitation: Stripe Payment Links join on email
 

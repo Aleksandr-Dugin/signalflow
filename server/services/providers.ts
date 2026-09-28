@@ -10,6 +10,7 @@ import {
   type personalizationSchema,
 } from "./groq";
 import { icpSchema } from "./groq";
+import type { PageFetcher, ScrapedPage } from "./contactExtraction";
 import { demoProspects, DEMO_DISCLOSURE } from "../../shared/demo";
 
 export type QualificationResult = z.infer<typeof qualificationSchema>;
@@ -285,6 +286,13 @@ export interface DiscoverInput {
 export interface LeadDiscoveryProvider {
   readonly name: "scrapegraph" | "mock";
   discoverProspects(input: DiscoverInput): Promise<CompanyCandidate[]>;
+  /**
+   * Raw public-page text, used by the contact-extraction second pass
+   * (services/contactExtraction). Returns nothing for pages that failed or were
+   * refused — callers must treat "no pages" as "no contact found", never as an
+   * error. Type-only import, so this does not create a module cycle.
+   */
+  fetchPages: PageFetcher;
 }
 
 class ScrapeGraphDiscovery implements LeadDiscoveryProvider {
@@ -344,10 +352,45 @@ class ScrapeGraphDiscovery implements LeadDiscoveryProvider {
       evidence,
     };
   }
+
+  /**
+   * Plain markdown scrape — no prompt, no schema, so no LLM in this path and no
+   * chance of the model inventing an address that was never printed.
+   *
+   * `mode: "normal"` rather than "reader": reader mode keeps the article and
+   * drops boilerplate, and on a contact page the boilerplate is often precisely
+   * where the address lives (footer). We would rather pay for more text than
+   * silently scrape away the thing we are looking for.
+   */
+  async fetchPages(urls: string[]): Promise<ScrapedPage[]> {
+    const client = this.client();
+    const pages: ScrapedPage[] = [];
+    for (const raw of urls) {
+      // Re-checked here rather than trusting the caller: this is the one place
+      // where an attacker-supplied address could turn our scraper into an
+      // internal-network probe (canonicalizeUrl refuses localhost/private IPs).
+      const url = canonicalizeUrl(raw);
+      if (!url) continue;
+      const res = await client
+        .scrape({ url, formats: [{ type: "markdown", mode: "normal" }] })
+        .catch(() => null);
+      if (!res || res.status !== "success") continue;
+      const text = res.data?.results?.markdown?.data?.[0];
+      if (text) pages.push({ url, text });
+    }
+    return pages;
+  }
 }
 
 class MockDiscovery implements LeadDiscoveryProvider {
   readonly name = "mock" as const;
+  // Demo companies are fictional. Fetching their invented domains would either
+  // return nothing or reach some unrelated real business that happens to own the
+  // name — and attaching that stranger's address to a demo prospect, then mailing
+  // it, is exactly the failure this whole guard exists to prevent.
+  async fetchPages(): Promise<ScrapedPage[]> {
+    return [];
+  }
   async discoverProspects(_input: DiscoverInput): Promise<CompanyCandidate[]> {
     // Explicitly demo-origin, fictional, and clearly labelled — never persisted
     // as if they were real, sourced companies (audit P0 provenance fix).

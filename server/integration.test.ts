@@ -24,6 +24,7 @@ import "./services/jobHandlers";
 import { makeIdempotencyKey, sendOutreachEmail } from "./services/outreach";
 import { ingestEmailEvent } from "./services/replies";
 import { handleCalendlyEvent, handleStripeEvent, applyStripeValue, recordCtaClick } from "./services/conversions";
+import { enrichProspectContact } from "./db";
 
 const databaseConfigured = Boolean(process.env.DATABASE_URL);
 
@@ -439,6 +440,19 @@ suite("autonomous loop against a real database", () => {
     expect(result.classification).toBeNull();
 
     await db!.delete(schema.workspaces).where(eq(schema.workspaces.id, otherWs));
+  });
+
+  // Automatic contact search is the one read path that ends up scraping the
+  // public internet with a user-supplied id, so its access control is worth
+  // pinning against a real database rather than reasoning about it.
+  it("refuses to search for a contact that is not the caller's", async () => {
+    await expect(enrichProspectContact(`ws_x_${run}`, prospectId)).rejects.toThrow(/Prospect not found/);
+    await expect(enrichProspectContact(workspaceId, "p_missing")).rejects.toThrow(/Prospect not found/);
+    if (!env.sgaiApiKey) {
+      // No scraper configured: say so, instead of reporting "no address found",
+      // which an operator would read as a result about the company.
+      await expect(enrichProspectContact(workspaceId, prospectId)).rejects.toThrow(/SGAI_API_KEY/);
+    }
   });
 
   // Kept last: it flips a global switch, so it must not overlap with any test

@@ -88,6 +88,35 @@ Note the asymmetry with the table above: the re-enqueue does **not** consult
 switch has never applied to it), but the master switch does stop it, because the
 worker refuses to claim any job while autonomy is paused.
 
+## Contact discovery: the second pass over the company's own pages
+
+Search results describe companies; they rarely name a human. So after discovery
+returns candidates that have no contact, `runDiscovery` (`server/db.ts`) makes a
+second pass — `/contact`, `/contact-us`, `/team`, `/about`, `/about-us`,
+`/company` — through `server/services/contactExtraction.ts`. Without it the
+pipeline produced prospects that could be scored but never written to.
+
+The rules that make this safe to run unattended:
+
+| Rule | Why it is load-bearing |
+| --- | --- |
+| **No LLM anywhere in the email path.** Selection is regex + ranking over scraped text. | A model asked for "the decision maker's email" invents a plausible one. A fabricated address means cold-mailing a stranger with someone else's name — and no test would catch it. Every address returned appeared verbatim on a page we fetched. |
+| Scrape with `formats: [{ type: "markdown", mode: "normal" }]`, no prompt, no schema | `reader` mode drops boilerplate, and on a contact page the footer *is* the content we want. Also keeps the call LLM-free and cheaper. |
+| Pages fetched one at a time, stopping at the first named person on the company's own domain | Scraping is billed per call. Finding the owner on `/contact` must not be followed by five more requests. |
+| Junk is dropped (`noreply@`, asset filenames, `example.com`, numeric ids); role mailboxes are **ranked last, not filtered** | `hello@` is the only published address for most five-person companies. It is returned with `name: ""` so the draft greets generically instead of writing "Dear Hello". `privacy@`/`legal@`/`dpo@` are kept deliberately. |
+| Name source is recorded: `page` (the company printed it) beats `email` (derived from `jane.doe@`) beats `none` | The operator can tell a real name from a guess. |
+| `sourceUrl` stored on the contact and shown in the UI | Provenance: click through to the page that published it before deciding to mail. |
+| `MAX_CONTACT_ENRICHMENTS` (default 10) caps companies per run; `0` disables the pass | Budget control, not a target. |
+| Mock/demo providers return **no pages at all** | An invented demo domain can be registered by a real business today; "finding" and mailing its owner would launder fake data into a live campaign. |
+| Scraped addresses get the same MX check as manual ones | `verified` means "this domain can receive mail", no more and no less. It is *not* mailbox verification — we do not claim that. |
+
+On demand: `contact.enrich` (tRPC, protected) runs the same pass for one prospect
+from its detail page. It is capped twice — the plan's AI-run budget plus a
+per-workspace 5-per-10-minutes wall-clock limit — because each click spends the
+platform's scraper credits. It returns `null` ("they publish nothing") rather than
+throwing, so the UI can report an honest empty result, and it refuses demo
+prospects and unconfigured providers with a message instead of silence.
+
 ## Funnel stages are evidence-driven, never cosmetic
 
 `opportunities.stage` advances only when something *external confirms it happened*.
@@ -127,13 +156,22 @@ Closing the loop needs these to be set *and* pointed at the deployed origin:
 
 ## Integrations that are wired but NOT yet verified end-to-end
 
-The whole loop above is written but has never run against a live database and a real
-mailbox. Before trusting it in production, execute the checklist in
-[docs/verification.md](./verification.md). Sending mail to real prospects without
-having passed it is not acceptable.
+The loop above runs against a real MySQL in CI
+([`.github/workflows/ci.yml`](../.github/workflows/ci.yml) and
+[docs/verification.md](./verification.md)): schema drift, the reply → follow-up job,
+evidence-driven stage moves, webhook contracts and the master switch are all executed
+there. What has never happened is a run against real third parties — a live SMTP
+mailbox with SPF/DKIM/DMARC, a real Mailgun/SendGrid inbound route, real Calendly and
+Stripe subscriptions, a real ScrapeGraph key. Execute the live checklist before
+mailing actual prospects; that is not optional.
 
 ## Deliberate constraints
 
+- Email is the **only outbound channel**. There is no phone/SMS, Telegram or WhatsApp
+  sender, and `contactExtraction` does not mine social profiles — scraping LinkedIn
+  and friends breaks their ToS, and an agent that gets its key revoked is worse than
+  one that has fewer channels. Numbers and social handles can be stored and used only
+  via a compliant enrichment provider.
 - Outbound is text/plain (plus optional HTML) with a `List-Unsubscribe` header and the
   RFC 8058 one-click POST — see `server/services/email.ts`. This is a deliverability
   requirement for Gmail/Yahoo bulk senders, not a nicety.

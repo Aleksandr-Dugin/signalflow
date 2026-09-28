@@ -6,6 +6,7 @@ import {
   dedupeCandidates,
   SearchQueryGenerator,
   getAIProvider,
+  getDiscoveryProvider,
   type CompanyCandidate,
 } from "./services/providers";
 import { env } from "./_core/env";
@@ -87,6 +88,32 @@ describe("SearchQueryGenerator", () => {
   it("always returns at least one query", () => {
     const queries = new SearchQueryGenerator().generate({ offer: "x", targetDescription: "", geography: "", industry: "", prospectTarget: 3 });
     expect(queries.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// The mock provider is what runs when no ScrapeGraph key is configured, and its
+// companies are fictional. It must never fetch a page: an invented domain can be
+// registered by a real business, and mailing whoever owns it now is precisely the
+// failure the demo-provenance guard exists to prevent.
+describe.skipIf(Boolean(env.sgaiApiKey))("MockDiscovery", () => {
+  const discovery = getDiscoveryProvider();
+
+  it("reports mock", () => expect(discovery.name).toBe("mock"));
+
+  it("fetches no page for a fictional company", async () => {
+    expect(await discovery.fetchPages(["https://acme-does-not-exist.example/contact"])).toEqual([]);
+  });
+
+  it("returns demo candidates that carry no scraped contact", async () => {
+    const found = await discovery.discoverProspects({
+      offer: "ops",
+      targetDescription: "",
+      geography: "",
+      industry: "",
+      prospectTarget: 3,
+    });
+    expect(found.length).toBeGreaterThan(0);
+    expect(found.every((c) => !c.contact)).toBe(true);
   });
 });
 

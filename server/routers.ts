@@ -11,8 +11,10 @@ import { getBillingStatus } from "./services/billing";
 import { getBillingProvider } from "./services/billingService";
 import { sendOutreachEmail, makeIdempotencyKey, OutreachError } from "./services/outreach";
 import { isProviderConfigured } from "./_core/oauth";
+import { hit } from "./_core/rateLimit";
 import {
   createCampaign,
+  enrichProspectContact,
   generateIcpForWorkspace,
   generatePersonalization,
   getProfile,
@@ -267,6 +269,34 @@ export const appRouter = router({
           return await upsertManualContact(workspaceId, input);
         } catch (err) {
           const message = err instanceof Error ? err.message : "could not save contact";
+          throw new TRPCError({ code: "BAD_REQUEST", message });
+        }
+      }),
+    // Search this company's own public pages for an address they published.
+    // Metered twice on purpose: the plan budget inside db.ts, and this wall-clock
+    // per-workspace cap — every click costs scraper credits, so one operator
+    // hammering the button must not be able to exhaust the provider key for the
+    // whole platform.
+    enrich: protectedProcedure
+      .input(z.object({ prospectId: z.string() }))
+      .mutation(async ({ ctx, input }) => {
+        const workspaceId = await requireWorkspace(ctx);
+        const { ok, retryAfterSec } = hit(`contact-enrich:${workspaceId}`, {
+          windowMs: 10 * 60_000,
+          max: 5,
+        });
+        if (!ok) {
+          throw new TRPCError({
+            code: "TOO_MANY_REQUESTS",
+            message: `Contact search is rate limited; try again in ${retryAfterSec}s.`,
+          });
+        }
+        try {
+          // Wrapped so "nothing published" is a value, not an exception: the UI
+          // has to be able to say "no address found" honestly.
+          return { contact: await enrichProspectContact(workspaceId, input.prospectId) };
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "could not search for a contact";
           throw new TRPCError({ code: "BAD_REQUEST", message });
         }
       }),

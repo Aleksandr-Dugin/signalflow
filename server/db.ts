@@ -28,6 +28,7 @@ import {
   type ResearchResult,
 } from "./services/providers";
 import { scoreProspect } from "./services/opportunity";
+import { enrichCandidateWithContact, enrichCandidatesWithContacts } from "./services/contactExtraction";
 
 // ── Workspace resolution ─────────────────────────────────────────────────────
 export async function resolveWorkspace(userId: string): Promise<string> {
@@ -284,10 +285,11 @@ async function upsertContact(
   c: CompanyCandidate,
 ): Promise<string | null> {
   if (!c.contact?.email) return null;
+  const email = c.contact.email.toLowerCase();
   const [existing] = await db
     .select()
     .from(schema.contacts)
-    .where(and(eq(schema.contacts.companyId, companyId), eq(schema.contacts.email, c.contact.email.toLowerCase())))
+    .where(and(eq(schema.contacts.companyId, companyId), eq(schema.contacts.email, email)))
     .limit(1);
   if (existing) return existing.id;
   const id = nanoid();
@@ -297,8 +299,13 @@ async function upsertContact(
     companyId,
     name: c.contact.name,
     title: c.contact.title ?? null,
-    email: c.contact.email.toLowerCase(),
-    verified: false,
+    email,
+    // Same check the manual path uses: the domain can receive mail at all. That
+    // proves less than a mailbox verification would (we cannot do that without
+    // a sender reputation risk / paid vendor), but leaving scraped addresses
+    // marked unverified while manual ones are marked is worse than useless — the
+    // operator would rightly assume nothing was ever checked.
+    verified: await domainHasMailRecords(email.split("@")[1] ?? ""),
     sourceUrl: c.contact.sourceUrl ?? c.sourceUrl,
   });
   return id;
@@ -335,7 +342,7 @@ export async function runDiscovery(workspaceId: string, campaignId: string): Pro
   const paid = ai.name === "groq";
   const origin = discovery.name === "scrapegraph" ? "live" : "demo";
 
-  const candidates = dedupeCandidates(
+  const discovered = dedupeCandidates(
     await discovery.discoverProspects({
       offer: campaign.offerDescription,
       targetDescription: campaign.targetDescription,
@@ -345,6 +352,15 @@ export async function runDiscovery(workspaceId: string, campaignId: string): Pro
       prospectTarget: cap,
     }),
   ).slice(0, cap);
+
+  // Second pass over each company's own /contact|/team|/about pages. Search
+  // results describe companies; they rarely name a human, so without this the
+  // pipeline produced prospects that could be scored but never written to.
+  const candidates = await enrichCandidatesWithContacts(
+    (urls) => discovery.fetchPages(urls),
+    discovered,
+    origin === "live" ? env.maxContactEnrichments : 0,
+  );
 
   const existingProspects = await db
     .select({ id: schema.prospects.id })
@@ -552,7 +568,17 @@ export async function getProspectDetail(workspaceId: string, prospectId: string)
   let contact = null as null | ProspectDetail["contact"];
   if (prospect.contactId) {
     const [row] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, prospect.contactId)).limit(1);
-    if (row) contact = { id: row.id, name: row.name, title: row.title, email: row.email ?? "", verified: row.verified };
+    if (row)
+      contact = {
+        id: row.id,
+        name: row.name,
+        title: row.title,
+        email: row.email ?? "",
+        verified: row.verified,
+        // Surfaced in the UI so a scraped address is always traceable to the page
+        // that printed it.
+        sourceUrl: row.sourceUrl ?? null,
+      };
   }
   const signalRows = await db.select().from(schema.signals).where(eq(schema.signals.companyId, prospect.companyId));
   const researchRows = await db
@@ -635,7 +661,14 @@ export async function listContacts(workspaceId: string, prospectId: string): Pro
     .from(schema.contacts)
     .where(and(eq(schema.contacts.companyId, prospect.companyId), eq(schema.contacts.workspaceId, workspaceId)))
     .orderBy(desc(schema.contacts.createdAt));
-  return rows.map((r) => ({ id: r.id, name: r.name, title: r.title ?? null, email: r.email ?? "", verified: r.verified }));
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    title: r.title ?? null,
+    email: r.email ?? "",
+    verified: r.verified,
+    sourceUrl: r.sourceUrl ?? null,
+  }));
 }
 
 export async function upsertManualContact(
@@ -684,6 +717,81 @@ export async function upsertManualContact(
   }
   await db.update(schema.prospects).set({ contactId }).where(eq(schema.prospects.id, input.prospectId));
   return { id: contactId, name, title, email, verified };
+}
+
+/**
+ * On-demand version of the discovery contact pass, for one prospect the operator
+ * is looking at ("find the person for me"). Returns the stored contact, or null
+ * when the company's own pages publish no usable address — a real answer, not an
+ * error, and the UI must say exactly that rather than spin forever.
+ *
+ * It never overwrites a contact we already have from another source: the
+ * enrichment step refuses to replace a typed address, and the same rule applies
+ * here, because an operator's knowledge beats a footer scrape.
+ */
+export async function enrichProspectContact(
+  workspaceId: string,
+  prospectId: string,
+): Promise<ContactRef | null> {
+  const db = getDb();
+  if (!db) throw new Error("Database unavailable.");
+  const [prospect] = await db
+    .select()
+    .from(schema.prospects)
+    .where(and(eq(schema.prospects.id, prospectId), eq(schema.prospects.workspaceId, workspaceId)))
+    .limit(1);
+  if (!prospect) throw new Error("Prospect not found.");
+
+  const [company] = await db
+    .select()
+    .from(schema.companies)
+    .where(eq(schema.companies.id, prospect.companyId))
+    .limit(1);
+  if (!company) throw new Error("Company not found.");
+  // Demo prospects are fictional companies: there is no real page to read, and
+  // inventing a "found" contact for them would launder fake data into the funnel.
+  if (company.origin !== "live") throw new Error("Automatic contact search needs a live prospect.");
+  if (!company.domain) throw new Error("This prospect has no website domain to search.");
+
+  const discovery = getDiscoveryProvider();
+  if (discovery.name !== "scrapegraph") {
+    throw new Error("No discovery provider configured. Set SGAI_API_KEY to search contact pages.");
+  }
+  const paid = getAIProvider().name === "groq";
+  await ensureAiBudget(workspaceId, paid, 1);
+
+  const enriched = await enrichCandidateWithContact(
+    (urls) => discovery.fetchPages(urls),
+    {
+      name: company.name,
+      domain: company.domain,
+      description: company.description ?? "",
+      websiteUrl: company.websiteUrl ?? `https://${company.domain}`,
+      sourceUrl: company.websiteUrl ?? `https://${company.domain}`,
+      origin: "live",
+      evidence: [],
+    },
+  );
+  if (!enriched.contact?.email) return null;
+
+  const contactId = await upsertContact(db, workspaceId, company.id, enriched);
+  if (!contactId) return null;
+  await db.update(schema.prospects).set({ contactId }).where(eq(schema.prospects.id, prospectId));
+
+  const [row] = await db
+    .select()
+    .from(schema.contacts)
+    .where(and(eq(schema.contacts.id, contactId), eq(schema.contacts.workspaceId, workspaceId)))
+    .limit(1);
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    title: row.title ?? null,
+    email: row.email ?? "",
+    verified: row.verified,
+    sourceUrl: row.sourceUrl ?? null,
+  };
 }
 
 // ── Personalization ─────────────────────────────────────────────────────────

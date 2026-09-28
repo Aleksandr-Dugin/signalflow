@@ -51,6 +51,12 @@ export const env = {
 
   // Discovery
   sgaiApiKey: str("SGAI_API_KEY"),
+  // Second discovery pass: how many companies per run get their own
+  // /contact|/team|/about pages scraped to find a real person's address. Each
+  // company costs scraper credits (the walk stops early once a named
+  // company-domain contact is found), so this is a budget cap, not a target.
+  // 0 turns automatic contact discovery off; manual contacts still work.
+  maxContactEnrichments: num("MAX_CONTACT_ENRICHMENTS", 10),
 
   // Outbound email
   smtpHost: str("SMTP_HOST"),

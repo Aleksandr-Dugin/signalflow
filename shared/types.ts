@@ -76,6 +76,12 @@ export interface ContactRef {
   title?: string | null;
   email: string;
   verified: boolean;
+  /**
+   * Where the address was published, when we know. Provenance is not decoration:
+   * an operator deciding whether to cold-mail this person needs to see the page
+   * that printed it.
+   */
+  sourceUrl?: string | null;
 }
 
 export interface ProspectDetail extends ProspectCard {
