@@ -7,6 +7,7 @@ import { AppToaster } from "@/components/common";
 import { Spinner } from "@/components/common";
 import Landing from "@/pages/Landing";
 import Login from "@/pages/Login";
+import Legal from "@/pages/Legal";
 import AppShell from "@/pages/AppShell";
 
 function Protected({ children }: { children: React.ReactNode }) {
@@ -26,6 +27,10 @@ function Routes() {
   return (
     <Switch>
       <Route path="/" component={Landing} />
+      {/* Public, and outside /app: a data subject must be able to reach the policy
+          without an account, and a prospect who received an email has neither. */}
+      <Route path="/privacy" component={() => <Legal slug="privacy" />} />
+      <Route path="/terms" component={() => <Legal slug="terms" />} />
       <Route path="/login" component={Login} />
       <Route path="/app/*">
         <Protected>

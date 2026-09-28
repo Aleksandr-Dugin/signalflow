@@ -25,6 +25,7 @@ import { makeIdempotencyKey, sendOutreachEmail } from "./services/outreach";
 import { ingestEmailEvent } from "./services/replies";
 import { handleCalendlyEvent, handleStripeEvent, applyStripeValue, recordCtaClick } from "./services/conversions";
 import { enrichProspectContact, listContacts, upsertManualContact } from "./db";
+import { addressWasForgotten, eraseSubjectData, exportSubjectData } from "./services/gdpr";
 
 const databaseConfigured = Boolean(process.env.DATABASE_URL);
 
@@ -513,6 +514,93 @@ suite("autonomous loop against a real database", () => {
     await db!.delete(schema.jobRuns).where(eq(schema.jobRuns.id, ghostId));
     const after = await queueReport();
     expect(after!.unhandled.map((u) => u.type)).not.toContain("integration.ghost");
+  });
+
+  // A subject access request and an erasure are the two operations the privacy page
+  // promises; the "we will look through the database" version is a promise nobody can
+  // keep in one sitting, so it is tested here against real rows. Uses its own second
+  // person so the shared fixture the other tests depend on is left intact.
+  it("answers and honours a request about one email address", async () => {
+    const subject = `erasure-${run}@acme-corp.example`;
+    const secondProspectId = `p_erased_${run}`;
+    const secondContactId = `ct_erased_${run}`;
+    await db!.insert(schema.contacts).values({
+      id: secondContactId,
+      workspaceId,
+      companyId,
+      name: "Erase Me",
+      title: "Ops Lead",
+      email: subject,
+      origin: "page",
+      sourceUrl: `https://acme-corp-${run}.example/team`,
+    });
+    await db!.insert(schema.prospects).values({
+      id: secondProspectId,
+      workspaceId,
+      campaignId,
+      companyId,
+      contactId: secondContactId,
+      status: "qualified",
+      origin: "live",
+      reasons: ["fits the offer"],
+    });
+    // Recipient is resolved from the prospect's contact, which is exactly the
+    // linkage the export has to follow.
+    const sent = await sendOutreachEmail({
+      workspaceId,
+      prospectId: secondProspectId,
+      subject: "Migrations without downtime",
+      body: "One line about your pipeline.",
+      idempotencyKey: `gdpr:${run}`,
+    });
+    await ingestEmailEvent({
+      fromAddress: subject,
+      eventType: "replied",
+      bodyText: "Not interested, please remove me.",
+      subject: "Re: Migrations without downtime",
+      dedupeKey: `int:${run}:gdpr`,
+    });
+    const jobId = await enqueueJob({ workspaceId, type: "reply.followup", payload: { prospectId: secondProspectId } });
+
+    const dossier = await exportSubjectData(workspaceId, `  ${subject.toUpperCase()}  `);
+    expect(dossier).not.toBeNull();
+    expect(dossier!.email).toBe(subject);
+    expect(dossier!.contacts.map((c) => c.id)).toContain(secondContactId);
+    expect(dossier!.outreach.map((m) => m.id)).toContain(sent.outreachId);
+    expect(dossier!.emailEvents.some((e) => e.bodyText?.includes("remove me"))).toBe(true);
+    // A queued follow-up is a future send, so the answer must disclose it — and the
+    // erasure must cancel it, or "deleted" would be a lie with a send scheduled.
+    expect(dossier!.pendingJobs.map((j) => j.id)).toContain(jobId);
+    expect(dossier!.provenance.join(" ")).toMatch(/typed in by a person|page|manual|provider/);
+
+    const result = await eraseSubjectData(workspaceId, subject);
+    expect(result.deleted.contacts).toBe(1);
+    expect(result.deleted.outreach).toBe(1);
+    expect(result.deleted.jobs).toBeGreaterThanOrEqual(1);
+    expect(result.deleted.emailEvents).toBeGreaterThanOrEqual(1);
+
+    const [contactRow] = await db!.select().from(schema.contacts).where(eq(schema.contacts.id, secondContactId)).limit(1);
+    expect(contactRow).toBeUndefined();
+    const [jobRow] = await db!.select().from(schema.jobRuns).where(eq(schema.jobRuns.id, jobId)).limit(1);
+    expect(jobRow).toBeUndefined();
+    const after = await exportSubjectData(workspaceId, subject);
+    expect(after).toBeNull();
+
+    // The company record survives, detached from the person: erasing one data subject
+    // must not destroy research about somebody else.
+    const [detached] = await db!.select().from(schema.prospects).where(eq(schema.prospects.id, secondProspectId)).limit(1);
+    expect(detached).toBeTruthy();
+    expect(detached!.contactId).toBeNull();
+    expect(detached!.reasons).toBeNull();
+
+    // And the same address is not collected again afterwards — the rule that makes
+    // the erasure last longer than the next discovery run.
+    await db!.insert(schema.suppressions).values({ id: `sp_${run}`, workspaceId, email: subject, reason: "unsubscribe" });
+    expect(await addressWasForgotten(workspaceId, subject)).toBe(true);
+    expect(await addressWasForgotten(`ws_other_${run}`, subject)).toBe(false);
+
+    await db!.delete(schema.prospects).where(eq(schema.prospects.id, secondProspectId));
+    await db!.delete(schema.suppressions).where(eq(schema.suppressions.email, subject));
   });
 
   // Kept last: it flips a global switch, so it must not overlap with any test

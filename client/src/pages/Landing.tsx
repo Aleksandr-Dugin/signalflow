@@ -271,6 +271,12 @@ export default function Landing() {
           <div className="flex items-center gap-2 font-mono text-xs uppercase tracking-wider text-muted-foreground">
             <ShieldCheck className="h-4 w-4 text-success" /> Standalone · your data, your keys
           </div>
+          {/* Linked from the page that markets sending email, which is where a
+              recipient looks for them. */}
+          <nav className="flex items-center gap-4 font-mono text-xs uppercase tracking-wider">
+            <Link href="/privacy" className="navlink text-muted-foreground">Privacy</Link>
+            <Link href="/terms" className="navlink text-muted-foreground">Terms</Link>
+          </nav>
           <p className="font-mono text-xs text-muted-foreground">© {new Date().getFullYear()} SIGNALFLOW</p>
         </div>
       </footer>

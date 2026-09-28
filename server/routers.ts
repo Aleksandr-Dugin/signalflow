@@ -45,6 +45,7 @@ import {
   setAutopilotGloballyPaused,
 } from "./services/autonomyState";
 import { queueReport } from "./services/jobs";
+import { eraseSubjectData, exportSubjectData } from "./services/gdpr";
 
 async function requireWorkspace(ctx: { user: { id: string } }): Promise<string> {
   return resolveWorkspace(ctx.user.id);
@@ -328,6 +329,48 @@ export const appRouter = router({
         const workspaceId = await requireWorkspace(ctx);
         const { id, ...patch } = input;
         return updateOpportunity(workspaceId, id, patch);
+      }),
+  }),
+
+  // Data-subject rights, reachable by the operator without a developer. Scoping is
+  // the same as everywhere else in this router — the caller's own workspace — and the
+  // confirm flag on erasure exists because "delete this person" is not a request to
+  // make with a stray click, and is not reversible by reloading the page.
+  gdpr: router({
+    export: protectedProcedure
+      .input(z.object({ email: z.string().email() }))
+      .query(async ({ ctx, input }) => {
+        const workspaceId = await requireWorkspace(ctx);
+        const { ok, retryAfterSec } = hit(`gdpr-export:${workspaceId}`, { windowMs: 10 * 60_000, max: 30 });
+        if (!ok) {
+          throw new TRPCError({
+            code: "TOO_MANY_REQUESTS",
+            message: `Subject access exports are limited; try again in ${retryAfterSec}s.`,
+          });
+        }
+        // "Nothing held" is an answer to the data subject, so it comes back as a
+        // null dossier rather than an error.
+        return { dossier: await exportSubjectData(workspaceId, input.email) };
+      }),
+    erase: protectedProcedure
+      .input(z.object({ email: z.string().email(), confirm: z.literal(true) }))
+      .mutation(async ({ ctx, input }) => {
+        const workspaceId = await requireWorkspace(ctx);
+        const { ok, retryAfterSec } = hit(`gdpr-erase:${workspaceId}`, { windowMs: 10 * 60_000, max: 10 });
+        if (!ok) {
+          throw new TRPCError({
+            code: "TOO_MANY_REQUESTS",
+            message: `Erasure requests are limited; try again in ${retryAfterSec}s.`,
+          });
+        }
+        try {
+          return await eraseSubjectData(workspaceId, input.email);
+        } catch (err) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: err instanceof Error ? err.message : "Erasure failed",
+          });
+        }
       }),
   }),
 

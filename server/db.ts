@@ -37,6 +37,7 @@ import {
 import { scoreProspect } from "./services/opportunity";
 import { enrichCandidateWithContact, enrichCandidatesWithContacts } from "./services/contactExtraction";
 import { getEnrichmentProvider, lookupPeople, type EnrichedPerson } from "./services/enrichment";
+import { addressWasForgotten } from "./services/gdpr";
 
 // ── Workspace resolution ─────────────────────────────────────────────────────
 export async function resolveWorkspace(userId: string): Promise<string> {
@@ -335,6 +336,11 @@ async function upsertContact(
 ): Promise<string | null> {
   const email = c.email.toLowerCase();
   if (!email) return null;
+  // An address that objected is not collected again, automated or not. The send
+  // path already refuses to mail the suppression list, but that alone means the
+  // next discovery run re-writes the personal data an erasure request just deleted —
+  // the right to be forgotten would survive exactly until the next scheduled scan.
+  if (await addressWasForgotten(workspaceId, email)) return null;
   const [existing] = await db
     .select()
     .from(schema.contacts)

@@ -1,11 +1,13 @@
+import { useState } from "react";
 import { Link } from "wouter";
 import { toast } from "sonner";
-import { Bot, Mail, ShieldCheck, ShieldOff } from "lucide-react";
+import { Bot, Download, Mail, ShieldCheck, ShieldOff, Trash2 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { trpc } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { PageHeader, ThemeToggle } from "@/components/common";
 
 export default function Settings() {
@@ -35,6 +37,49 @@ export default function Settings() {
   // workspace "live" for a moment on every page load, and "live" is the claim
   // this line exists to withhold while the truth is unknown.
   const operatorPaused = autopilot.data?.globalPaused;
+
+  // Data-subject requests. Kept here rather than on each prospect page because the
+  // request arrives as an email address, not as one of our ids — and the answer has
+  // to cover every row that address touches, across campaigns.
+  const [subjectEmail, setSubjectEmail] = useState("");
+  const [eraseArmed, setEraseArmed] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const erase = trpc.gdpr.erase.useMutation({
+    onSuccess: (r) => {
+      const gone = Object.values(r.deleted).reduce((a, b) => a + b, 0);
+      toast.success(gone ? `Erased ${gone} record(s) for ${r.email}` : `Nothing was held for ${r.email}`);
+      setEraseArmed(false);
+    },
+    onError: (e) => {
+      toast.error(e.message);
+      setEraseArmed(false);
+    },
+  });
+
+  async function runExport() {
+    const email = subjectEmail.trim();
+    if (!email) return toast.error("Enter the address the request is about.");
+    setExporting(true);
+    try {
+      const { dossier } = await utils.gdpr.export.fetch({ email });
+      if (!dossier) {
+        toast.info("Nothing is held for that address — which is itself the answer to give them.");
+        return;
+      }
+      const blob = new Blob([JSON.stringify(dossier, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `subject-access-${dossier.email}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success("Structured copy downloaded — send it to the person who asked.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Export failed");
+    } finally {
+      setExporting(false);
+    }
+  }
 
   return (
     <div>
@@ -135,6 +180,83 @@ export default function Settings() {
             ) : (
               <p className="text-sm text-muted-foreground">No profile set — <Link href="/app/onboarding" className="text-primary underline">complete setup</Link>.</p>
             )}
+          </CardContent>
+        </Card>
+
+        <Card className="sm:col-span-2">
+          <CardContent className="p-6">
+            <h2 className="flex items-center gap-2 font-semibold">
+              <ShieldCheck className="h-4 w-4 text-primary" /> Data subject requests
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              When someone asks what you hold about them, or asks you to delete it, search their
+              address here. The export is the complete answer — contact record, every message sent to
+              them, everything they wrote back, and the scores derived from it — as one file you can
+              send on. Erasing removes those rows from this workspace.
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Input
+                value={subjectEmail}
+                onChange={(e) => {
+                  setSubjectEmail(e.target.value);
+                  setEraseArmed(false);
+                }}
+                placeholder="person@company.com"
+                className="max-w-xs"
+                aria-label="Email address the request concerns"
+              />
+              <Button variant="outline" size="sm" onClick={runExport} disabled={exporting || !subjectEmail.trim()}>
+                <Download className="mr-1.5 h-4 w-4" /> {exporting ? "Preparing…" : "Export their data"}
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                disabled={!subjectEmail.trim() || erase.isPending}
+                onClick={() => {
+                  // Two clicks, because the second one cannot be undone and the first
+                  // one is cheap: an erasure executed by accident is itself a breach.
+                  if (!eraseArmed) {
+                    setEraseArmed(true);
+                    return;
+                  }
+                  erase.mutate({ email: subjectEmail.trim(), confirm: true });
+                }}
+              >
+                <Trash2 className="mr-1.5 h-4 w-4" />
+                {erase.isPending
+                  ? "Erasing…"
+                  : eraseArmed
+                    ? `Confirm erase ${subjectEmail.trim()}`
+                    : "Erase their data"}
+              </Button>
+            </div>
+            {eraseArmed ? (
+              <p className="mt-2 text-xs text-destructive">
+                This deletes rows and cannot be undone. The first click changed nothing.
+              </p>
+            ) : null}
+            {/* Only this address's own result: a report left on screen after the
+                field was changed would describe a different person's deletion. */}
+            {erase.data && erase.data.email === subjectEmail.trim().toLowerCase() ? (
+              <div className="mt-3 space-y-2 text-xs">
+                <p className="font-mono">
+                  deleted: {Object.entries(erase.data.deleted)
+                    .filter(([, n]) => n > 0)
+                    .map(([k, n]) => `${k} ${n}`)
+                    .join(", ") || "nothing was held"}
+                </p>
+                {erase.data.retained.map((r) => (
+                  <p key={r.what} className="rounded-md border border-[var(--brutal-line)] bg-card p-2 text-muted-foreground">
+                    <span className="font-medium text-foreground">Kept: {r.what}.</span> {r.why}
+                  </p>
+                ))}
+              </div>
+            ) : null}
+            <p className="mt-3 text-xs text-muted-foreground">
+              A suppression entry survives an erasure on purpose — forgetting an opt-out is what makes
+              the next campaign mail them again. See the <Link href="/privacy" className="underline">privacy policy</Link>{" "}
+              and <Link href="/terms" className="underline">terms</Link> for what this deployment claims.
+            </p>
           </CardContent>
         </Card>
       </div>

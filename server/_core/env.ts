@@ -85,6 +85,12 @@ export const env = {
   // Must be a mailbox that can actually receive replies. Also powers the mailto
   // leg of the RFC 8058 List-Unsubscribe header.
   smtpReplyTo: str("SMTP_REPLY_TO"),
+  // CAN-SPAM and most equivalents require a valid physical postal address in every
+  // commercial message. It cannot be derived from anything else we have, so the
+  // operator must supply it; the footer prints it only when set. Leaving it unset
+  // does not stop sending — see the boot warning below — but a campaign mailed
+  // without it is the operator's violation, not this software's bug.
+  senderPostalAddress: str("SENDER_POSTAL_ADDRESS"),
   replyIngestSecret: str("REPLY_INGEST_SECRET"),
 
   // Billing
@@ -129,9 +135,16 @@ export function isAdminEmail(email?: string | null): boolean {
  * Fail-fast configuration validation. Called at boot. In production a missing
  * JWT_SECRET must stop the process rather than silently 500 every auth call
  * (audit P1 fix).
+ *
+ * Warnings are the second tier: configuration that is legal to run but wrong for a
+ * real deployment. They do not stop the process — refusing to boot over a missing
+ * postal address would break an operator who is mid-setup and has no way to read
+ * this advice at that moment — but they name the consequence instead of describing
+ * the variable, so the log line is actionable on its own.
  */
 export function assertRuntimeConfig(): void {
   const problems: string[] = [];
+  const warnings: string[] = [];
   if (!env.jwtSecret || env.jwtSecret.length < 16) {
     problems.push("JWT_SECRET must be set to a long random string (>= 16 chars).");
   }
@@ -140,8 +153,24 @@ export function assertRuntimeConfig(): void {
     if (env.jwtSecret === "change-me-to-a-long-random-string-at-least-32-chars") {
       problems.push("JWT_SECRET is still the example value.");
     }
+    if (env.smtpHost && !env.senderPostalAddress) {
+      warnings.push(
+        "SMTP is configured but SENDER_POSTAL_ADDRESS is unset: every message goes out without the physical address CAN-SPAM and equivalent laws require. Sending anyway is the operator's compliance decision, not a configuration detail to ignore.",
+      );
+    }
+    if (!env.trustProxy) {
+      warnings.push(
+        "TRUST_PROXY is off. Behind a load proxy every request arrives from one IP, so per-client rate limits — auth, contact search, reply ingest — collapse into a single shared bucket and start blocking real users.",
+      );
+    }
+    if (!env.replyIngestSecret) {
+      warnings.push(
+        "REPLY_INGEST_SECRET is unset, so inbound webhook requests cannot be authenticated. The endpoints refuse everything (fail closed), which means replies arrive nowhere and the funnel silently stops at 'sent'.",
+      );
+    }
   }
   if (problems.length > 0) {
     throw new Error(`Invalid configuration:\n - ${problems.join("\n - ")}`);
   }
+  for (const warning of warnings) console.warn(`[config] ${warning}`);
 }

@@ -8,13 +8,19 @@ has, do not enable per-workspace autopilot against real prospects.
 What CI already covers (`.github/workflows/ci.yml`):
 
 - `pnpm check` — TypeScript over server, client and shared code.
-- `pnpm test` — unit tests, plus `server/integration.test.ts` against a real MySQL 8
+- `pnpm test` — unit tests (`server/jobs.test.ts` for the queue report and the
+  heartbeat arithmetic, `server/gdpr.test.ts` for which job rows an erasure is allowed
+  to cancel and for the factual claims the privacy policy makes about the code), plus
+  `server/integration.test.ts` against a real MySQL 8
   container: baseline migration matches `schema.ts`, outreach send + idempotent retry,
   reply ingest → classification → opportunity → follow-up job claimed and completed by
   the worker, the full CTA → Calendly → Stripe walk to `won`, webhook replay inertness,
   the cross-tenant address-collision refusal, the master autonomy switch holding a
   queued job, blocking new queuing, surviving a read-back, and releasing on resume,
-  and the contact search refusing a prospect that belongs to another workspace.
+  the contact search refusing a prospect that belongs to another workspace, a queue
+  report that names a job type nothing handles instead of calling it healthy, and a
+  subject-access export followed by an erasure that leaves the suppression entry and
+  detaches the prospect.
 - Contact selection itself is pure string work and is covered by `server/contacts.test.ts`
   against fixture markdown: no fabricated address can appear, `noreply@`/asset
   filenames/documentation placeholders are refused, role mailboxes rank last instead of
@@ -230,6 +236,42 @@ the queue stops moving, so no follow-up is ever sent and no error is ever raised
 - [ ] Leave a job `running` and kill the worker; confirm the reclaim path returns it to
       `queued` within ~10 minutes and that the stuck count in the report agrees with the
       window (they read the same constant, so change one only with the other).
+
+### 10. Legal pages and data-subject requests
+
+Nothing here is a checkbox the code can close: the documents are drafted, but they are
+the operator's legal statement, and until `CONTROLLER` in `shared/legal.ts` is filled in
+the pages render with a "Draft — not yet fit to publish" banner (`/privacy`, `/terms`).
+
+- [ ] Open `/privacy` and confirm the banner is present on this build, then remove every
+      `TODO:` in `CONTROLLER` (legal name, contact email, EU representative, governing
+      law, hosting region) and confirm the banner disappears. A policy that names no
+      controller is not a policy.
+- [ ] Read the subprocessor list against the accounts actually paid for: a provider
+      listed but not used is a false disclosure, and one used but not listed is a
+      missing one. The list is conditional (enrichment vendor, Calendly, Stripe) —
+      delete the rows that do not apply to this deployment.
+- [ ] Have the text reviewed by a person who can accept liability. The code encodes the
+      lawful basis the product is actually built around (Art 6(1)(f) plus the
+      restrictions in this repo: role-mailbox refusal, enrichment opt-in, suppression
+      gate); a lawyer may still require changes for the real entity and territory.
+- [ ] In Settings → Data subject requests, export a real address and confirm the JSON
+      answers *where it came from* (`provenance`: origin, source URLs, and the fact that
+      inbound reply bodies are stored verbatim) and not only row dumps. An address
+      nothing is held about must come back as "nothing held", not as an empty file.
+- [ ] Erase that same address twice (two-click confirm) and read the retention note: the
+      suppression entry and the company record stay, the person's scores and contact go.
+      Confirm the prospect row still exists with no contact and no reasons.
+- [ ] After an erasure, run discovery/enrichment over the same company and confirm the
+      forgotten address is not written back automatically (`upsertContact` refuses it).
+      Then confirm a human can still add a contact deliberately — that asymmetry is
+      intended, because nothing in the UI lets you delete a suppression row.
+- [ ] Send a message to a live address and read the footer: unsubscribe line, the
+      `SENDER_POSTAL_ADDRESS` value, and a link to `/privacy`. Set the variable before
+      the first real campaign; a production boot warns when SMTP is configured without it.
+- [ ] Confirm the rate limits bite: 30 exports / 10 erasures per 10 minutes per workspace.
+      These endpoints read the whole subject graph, so they are the one user-facing path
+      worth hammering on purpose.
 
 ## Known limitation: Stripe Payment Links join on email
 

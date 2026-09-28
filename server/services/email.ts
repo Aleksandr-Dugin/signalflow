@@ -26,9 +26,34 @@ export interface EmailProvider {
   send(email: OutboundEmail): Promise<SendResult>;
 }
 
+/**
+ * The compliance block appended to every outbound message.
+ *
+ * Three lines, each answering a different legal requirement rather than one
+ * generic disclaimer: a way to stop (unsubscribe by link *and* by reply, because a
+ * reply is the form a human can always perform), who is sending and where they can
+ * be reached physically (CAN-SPAM's valid postal address), and why this person is
+ * being written to at all (the privacy policy, which is where the claimed lawful
+ * basis and the erasure route live).
+ *
+ * The postal address is only printed when configured. A footer that promised an
+ * address nobody set would be a false statement inside a message whose whole purpose
+ * is legal identification, so the boot warning in `_core/env.ts` is what nags instead.
+ */
+export function buildFooter(email: OutboundEmail): string {
+  const lines: string[] = [];
+  if (email.unsubscribeUrl) {
+    lines.push(`No longer want to hear from us? Reply "unsubscribe" or use: ${email.unsubscribeUrl}`);
+  }
+  if (env.senderPostalAddress) lines.push(env.senderPostalAddress.trim());
+  lines.push(`${env.publicUrl.replace(/\/$/, "")}/privacy`);
+  return lines.join("\n");
+}
+
 function buildTextBody(email: OutboundEmail): string {
-  if (!email.unsubscribeUrl) return email.text;
-  return `${email.text}\n\n—\nNo longer want to hear from us? Reply "unsubscribe" or use: ${email.unsubscribeUrl}`;
+  const footer = buildFooter(email);
+  if (!footer) return email.text;
+  return `${email.text}\n\n—\n${footer}`;
 }
 
 /**

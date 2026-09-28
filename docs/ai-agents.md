@@ -224,6 +224,51 @@ Closing the loop needs these to be set *and* pointed at the deployed origin:
   **While a secret is unset the corresponding endpoint rejects everything** (503),
   so a misconfigured deployment cannot be spoofed into fake `won` deals.
 
+## The person on the other end: legal basis and data-subject rights
+
+An agent that finds strangers and writes to them is doing processing of personal data,
+so the law is part of the loop rather than a page footer. Two things are true here, and
+both are enforced in code before they are claimed in text.
+
+**The basis is legitimate interests (Art 6(1)(f)), and the restrictions *are* the
+balancing test.** A recorded assessment that the recipient would expect this message is
+worthless if the product does whatever it can get away with, so the controls below are
+what the privacy policy points at — `shared/legal.ts` and `server/gdpr.test.ts` bind the
+policy sentences to real code behaviour:
+
+| Control | Where |
+| --- | --- |
+| Role mailboxes (`info@`, `support@`) rank last on the free page pass, and a bought one is refused outright | `server/services/contactExtraction.ts`, `rankPeople` in `server/services/enrichment.ts` |
+| Buying contacts is opt-in per deployment *and* per run; a key alone spends nothing | `ENRICHMENT_PROVIDER` / `ENRICHMENT_AUTO_DISCOVER` |
+| Suppressed addresses cannot be sent to, checked at send time | `isSuppressed` in `server/services/outreach.ts` |
+| A forgotten address cannot be re-collected by an automated write | `addressWasForgotten` in `server/services/gdpr.ts`, called by `upsertContact` |
+| Unsubscribe is one click both ways: the RFC 8058 headers and the `POST /api/replies/unsubscribe` they point at (unguessable `ref` token, idempotent) | `buildUnsubscribeHeaders` in `server/services/email.ts`, `server/_core/conversionWebhooks.ts` |
+| Every outbound message carries unsubscribe, postal address and the policy link | `buildFooter` in `server/services/email.ts` |
+| No social-network scraping | `server/services/contactExtraction.ts` |
+
+**Rights are operations, not promises.** `server/services/gdpr.ts` implements
+`exportSubjectData` (everything held about one address, plus `provenance` lines
+explaining where it came from) and `eraseSubjectData`, exposed as `gdpr.export` /
+`gdpr.erase` and driven from Settings → Data subject requests. Answering in the
+conversation that asks is only possible because a subject is one query away.
+
+Two erasure decisions are deliberate and should not be "fixed":
+
+1. **The suppression entry survives.** Forgetting an opt-out is precisely what makes the
+   next campaign mail that person again, so Art 17(3)(b) applies and the retained row is
+   reported to the operator with its reason instead of being quietly kept.
+2. **The company record survives, detached.** A prospect row is a company's place in a
+   campaign; wiping it destroys someone else's research and lets the build claim more
+   than it did. Erasure nulls `contactId`, `reasons` and `disqualifiers` on it — the part
+   that was an assessment of the person — and cancels queued jobs, because a follow-up
+   waiting to run is the only row in an erasure that can still send mail tomorrow.
+
+The policy and terms are shipped as drafts: `CONTROLLER` in `shared/legal.ts` holds the
+operator's legal name, contact address, EU representative, governing law and hosting
+region, all of it `TODO:` until filled, and `client/src/pages/Legal.tsx` prints a loud
+"not yet fit to publish" banner while any placeholder remains. The code can write the
+structure; only the operator can sign the statement.
+
 ## Integrations that are wired but NOT yet verified end-to-end
 
 The loop above runs against a real MySQL in CI
@@ -244,7 +289,8 @@ mailing actual prospects; that is not optional.
   via a compliant enrichment provider.
 - Outbound is text/plain (plus optional HTML) with a `List-Unsubscribe` header and the
   RFC 8058 one-click POST — see `server/services/email.ts`. This is a deliverability
-  requirement for Gmail/Yahoo bulk senders, not a nicety.
+  requirement for Gmail/Yahoo cold mail, not a nicety. The body footer adds the postal
+  address (`SENDER_POSTAL_ADDRESS`, a CAN-SPAM requirement) and a link to `/privacy`.
 - Every provider payload is stored under a deterministic `dedupeKey` so replayed
   webhooks are no-ops.
 - Original inbound bodies are preserved in `email_events.body_text` for audit.

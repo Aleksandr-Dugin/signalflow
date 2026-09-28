@@ -15,7 +15,8 @@ import {
   isCtaKind,
   trackCtaLinks,
 } from "./services/cta";
-import { buildUnsubscribeHeaders, type OutboundEmail } from "./services/email";
+import { buildFooter, buildUnsubscribeHeaders, type OutboundEmail } from "./services/email";
+import { env } from "./_core/env";
 import { verifySignedHeader } from "./_core/conversionWebhooks";
 import { parseCalendlyPayload, type CalendlyPayload } from "./services/conversions";
 
@@ -145,14 +146,17 @@ describe("cta link tracking", () => {
   });
 });
 
-describe("List-Unsubscribe headers (RFC 8058)", () => {
-  const base: OutboundEmail = {
-    toName: "Jo",
-    toEmail: "jo@acme.co",
-    subject: "s",
-    text: "t",
-  };
+// Shared outbound-message fixture: the two describes below both reason about the
+// compliance surface of one message, and a footer without a header (or the other way
+// round) is exactly the inconsistency worth catching.
+const base: OutboundEmail = {
+  toName: "Jo",
+  toEmail: "jo@acme.co",
+  subject: "s",
+  text: "t",
+};
 
+describe("List-Unsubscribe headers (RFC 8058)", () => {
   it("emits an angle-bracket URI and the one-click POST directive", () => {
     const headers = buildUnsubscribeHeaders({
       ...base,
@@ -178,6 +182,42 @@ describe("List-Unsubscribe headers (RFC 8058)", () => {
 
   it("emits nothing without an unsubscribe URL", () => {
     expect(buildUnsubscribeHeaders(base)).toBeUndefined();
+  });
+});
+
+describe("compliance footer of an outbound message", () => {
+  const withPostal = (address: string, fn: () => void) => {
+    const previous = env.senderPostalAddress;
+    (env as { senderPostalAddress: string }).senderPostalAddress = address;
+    try {
+      fn();
+    } finally {
+      (env as { senderPostalAddress: string }).senderPostalAddress = previous;
+    }
+  };
+
+  it("always links the privacy policy, because that is where the lawful basis and the erasure route are stated", () => {
+    const footer = buildFooter(base);
+    expect(footer).toContain(`${env.publicUrl.replace(/\/$/, "")}/privacy`);
+  });
+
+  it("prints the postal address only when one is configured", () => {
+    // CAN-SPAM wants a valid physical address; a footer that invented one would be a
+    // false statement, and one that silently omitted the operator's real address
+    // would be worse. So: print it when known, never when not.
+    withPostal("12 Example Street, Springfield", () => {
+      expect(buildFooter(base)).toContain("12 Example Street, Springfield");
+    });
+    withPostal("", () => {
+      expect(buildFooter(base)).not.toMatch(/Street|Suite|Road/);
+    });
+  });
+
+  it("offers the reply-a-word unsubscribe only when there is a link to offer", () => {
+    expect(buildFooter({ ...base, unsubscribeUrl: "https://app.example.com/u?ref=abc" })).toMatch(
+      /Reply "unsubscribe"/,
+    );
+    expect(buildFooter(base)).not.toMatch(/Reply "unsubscribe"/);
   });
 });
 

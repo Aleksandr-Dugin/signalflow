@@ -280,6 +280,19 @@ async function main() {
     String(landing.status),
   );
 
+  // The legal pages are SPA routes with no server handler, and `/api` has a
+  // catch-all 404 mounted: reaching them proves the SPA fallback does not swallow
+  // them. A policy nobody can load is the same as no policy.
+  for (const route of ["/privacy", "/terms"]) {
+    const res = await fetch(`${BASE}${route}`);
+    const html = await res.text();
+    check(
+      `GET ${route} serves the app instead of 404`,
+      res.status === 200 && html.includes("root"),
+      String(res.status),
+    );
+  }
+
   await stopServer(child);
   console.log(`\n${failures === 0 ? "smoke: all checks passed" : `smoke: ${failures} check(s) FAILED`}`);
   process.exit(failures === 0 ? 0 : 1);
