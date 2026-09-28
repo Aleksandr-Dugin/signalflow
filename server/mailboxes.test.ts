@@ -1,8 +1,8 @@
-import { describe, it, expect, afterEach, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, beforeAll, afterAll } from "vitest";
 import { nanoid } from "nanoid";
 import { eq } from "drizzle-orm";
 import * as schema from "../drizzle/schema";
-import { closeDb, getDb } from "./_core/database";
+import { getDb } from "./_core/database";
 import { env } from "./_core/env";
 import { decryptSecret, encryptSecret, mailCryptoConfigured } from "./services/crypto";
 import {
@@ -326,15 +326,20 @@ dbSuite("mailbox gate + priority against a real database", () => {
     });
   });
 
+  // Re-apply the credential key before every test: the file-level afterEach restores
+  // the env snapshot (so unit tests cannot leak config), which would otherwise strip
+  // the key the second test needs to decrypt its stored token.
+  beforeEach(() => withMailEnv());
+
   afterAll(async () => {
     if (!db) return;
+    // workspaces cascade to their mailboxes (FK onDelete: cascade), one delete.
     await db.delete(schema.workspaces).where(eq(schema.workspaces.ownerId, userId));
-    await closeDb().catch(() => {});
   });
 
   it("throws (never silently falls back) when a mailbox is linked but gated", async () => {
     await expect(getUsableMailbox(gatedWs)).rejects.toBeInstanceOf(MailboxGatedError);
-    await expect(resolveEmailProvider(gatedWs)).rejects.toMatchObject({ code: "MAILBOX_GATED" });
+    await expect(resolveEmailProvider(gatedWs)).rejects.toBeInstanceOf(MailboxGatedError);
   });
 
   it("returns a live mailbox with a decrypted access token when connected", async () => {
