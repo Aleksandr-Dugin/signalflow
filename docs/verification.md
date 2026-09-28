@@ -14,7 +14,10 @@ What CI already covers (`.github/workflows/ci.yml`):
 - `pnpm check` — TypeScript over server, client and shared code.
 - `pnpm test` — unit tests (`server/jobs.test.ts` for the queue report and the
   heartbeat arithmetic, `server/gdpr.test.ts` for which job rows an erasure is allowed
-  to cancel and for the factual claims the privacy policy makes about the code), plus
+  to cancel and for the factual claims the privacy policy makes about the code,
+  `server/channels.test.ts` for the messenger consent rules — what may grant permission,
+  what must refuse a send, the 24 h window arithmetic and its cap, and the exact shape of
+  each provider request), plus
   `server/integration.test.ts` against a real MySQL 8
   container: baseline migration matches `schema.ts`, outreach send + idempotent retry,
   reply ingest → classification → opportunity → follow-up job claimed and completed by
@@ -22,9 +25,10 @@ What CI already covers (`.github/workflows/ci.yml`):
   the cross-tenant address-collision refusal, the master autonomy switch holding a
   queued job, blocking new queuing, surviving a read-back, and releasing on resume,
   the contact search refusing a prospect that belongs to another workspace, a queue
-  report that names a job type nothing handles instead of calling it healthy, and a
-  subject-access export followed by an erasure that leaves the suppression entry and
-  detaches the prospect.
+  report that names a job type nothing handles instead of calling it healthy, a
+  messenger permission that only an inbound event can create and only the prospect can
+  revoke, and a subject-access export followed by an erasure that leaves the suppression
+  entry and detaches the prospect.
 - Contact selection itself is pure string work and is covered by `server/contacts.test.ts`
   against fixture markdown: no fabricated address can appear, `noreply@`/asset
   filenames/documentation placeholders are refused, role mailboxes rank last instead of
@@ -33,12 +37,18 @@ What CI already covers (`.github/workflows/ci.yml`):
   at all for demo companies).
 - `pnpm build` — Vite client bundle + esbuild server bundle.
 - `pnpm smoke` (`scripts/smoke.mjs`) — boots the real server with no database and
-  asserts the HTTP edge: tracked CTA clicks redirect to the configured Calendly/Stripe
-  targets, an unknown CTA kind is a `404` with no `Location` (so the endpoint cannot be
+  asserts the HTTP edge: tracked CTA clicks redirect to the configured Calendly/Stripe/Telegram
+  targets (the Telegram one carrying our reference as the bot's `start` parameter), an
+  unknown CTA kind is a `404` with no `Location` (so the endpoint cannot be
   abused as an open redirect), unsigned / wrong-secret / tampered-body / stale-timestamp
   provider callbacks are all `401`, a validly-signed callback that cannot be persisted
   answers `503` so the provider retries instead of losing the signal, and both the
-  one-click `POST` and the `GET` landing page of the unsubscribe route work.
+  one-click `POST` and the `GET` landing page of the unsubscribe route work. The messenger
+  endpoints are checked twice over: with their secrets configured (a missing or forged
+  Telegram secret and a missing, forged or mis-paired WhatsApp signature are each `401`,
+  the `hub.challenge` handshake only answers the configured token, and an update from a bot
+  is acknowledged rather than stored), and in a second boot with no channel credentials at
+  all, where every inbound route answers `503`.
 
 > **Status: executed and green.** CI run #3
 > (`161b133`) passed both jobs on real MySQL 8: migrations applied from the
@@ -311,6 +321,44 @@ page still looks like a system that is working.
 - [ ] Confirm a non-admin sees "Only a platform operator can resume it" and no Admin link.
 - [ ] On Admin, confirm the *Recurring discovery* tile carries the "held" hint while the
       switch is out — a schedule that is not firing must not be printed as a bare interval.
+
+### 12. Messenger channels and their consent model
+
+The failure this covers is a channel that quietly becomes a cold-messaging tool, or that
+is wired half-way and looks idle when it is actually dead. Unit and integration tests
+prove the decision logic and the request shapes; only a real bot can prove the platform
+agrees.
+
+- [ ] Register the Telegram webhook and send a message to a test prospect that contains
+      the plain `https://t.me/<bot>` link. Confirm it reaches them as
+      `/api/track/cta/<ref>/telegram` (the stored `outreach_messages.body` shows the
+      tracked form) and that clicking it opens the bot with our reference attached.
+- [ ] Press Start in Telegram. Confirm a `channel_identities` row appears on the prospect
+      page with `consentSource = telegram.start`, dated now, and that the **opportunity
+      stage did not move** — opening a chat is recorded as evidence, never as a buying
+      signal.
+- [ ] Send from the channel card. Check the platform actually receives it, and that the
+      Conversation shows the outbound message labelled `via telegram` — a chat reply must
+      not look like an email reply.
+- [ ] On a prospect with **no** channel row, confirm the send is refused in words that say
+      what to do ("never written to us … link in your email"), and that the refusal is
+      shown to the user, not just logged. Nothing may be sent to a number you merely stored.
+- [ ] Send `STOP` to the bot. Confirm the row is revoked, that the send box is disabled with
+      the revocation date, and that writing again reopens it. Then block the bot and send:
+      the platform's `bot was blocked` error must be recorded as a revocation and a `failed`
+      message, never as `sent`.
+- [ ] With only `TELEGRAM_BOT_TOKEN` set and no webhook secret, boot the server and read the
+      log: it must warn that the channel can never gain permission. The same for a WhatsApp
+      sender without `WHATSAPP_APP_SECRET`. A half-configured channel is not "no takers yet".
+- [ ] On WhatsApp, wait past `MESSENGER_WINDOW_HOURS` (set it to 1 for the test) and confirm
+      a send is refused with the reply-window reason, then message the business number and
+      confirm the same send is now allowed. Set it to `48` and confirm the effective window
+      is still 24 — the setting shortens our window, it cannot exceed Meta's.
+- [ ] Have a person who is *not* a prospect press Start. Confirm nothing is stored for them
+      (`attributed: false`) — an unattributable event must never become a future licence.
+- [ ] Ask for erasure on a prospect with a channel history (Settings → Data subject
+      requests). Confirm the export lists the channel and its consent provenance, and that
+      the erasure removes the identity and the channel messages.
 
 ## Known limitation: Stripe Payment Links join on email
 

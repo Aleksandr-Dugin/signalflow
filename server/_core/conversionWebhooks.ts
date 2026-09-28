@@ -1,6 +1,6 @@
 // Conversion + click-tracking endpoints.
 //
-//   GET  /api/track/cta/:ref/:kind     attributed redirect for Calendly/Stripe CTAs
+//   GET  /api/track/cta/:ref/:kind     attributed redirect for Calendly/Stripe/Telegram CTAs
 //   POST /api/conversions/calendly     meeting booked -> meeting_booked
 //   POST /api/conversions/stripe       payment captured -> won
 //   POST /api/replies/unsubscribe      RFC 8058 one-click List-Unsubscribe
@@ -93,7 +93,7 @@ export function mountConversionEndpoints(app: Express): void {
   app.get("/api/track/cta/:ref/:kind", trackLimiter, async (req, res) => {
     const kind = req.params.kind;
     const ref = String(req.params.ref ?? "");
-    const target = isCtaKind(kind) ? ctaTargetFor(kind) : null;
+    const target = isCtaKind(kind) ? ctaTargetFor(kind, ref) : null;
     if (!isCtaKind(kind) || !target) {
       // Link was sent before the tool was configured, or the kind is bogus.
       return res.status(404).send("This link is no longer available.");

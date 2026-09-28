@@ -15,6 +15,7 @@ import { getDb } from "../_core/database";
 import { env } from "../_core/env";
 import { resolveOutreach, type InboundEmailInput } from "./replies";
 import { applySignal, type ConversionSignal, type OpportunityStage } from "./opportunity";
+import { telegramDeepLink } from "./channels";
 import type { CtaKind } from "./cta";
 
 export interface ConversionOutcome {
@@ -135,11 +136,13 @@ export async function recordCtaClick(referenceId: string, kind: CtaKind): Promis
     subject:
       kind === "payment"
         ? "Clicked the self-serve pricing link"
-        : "Clicked the meeting-booking link",
+        : kind === "telegram"
+          ? "Opened the Telegram chat link"
+          : "Clicked the meeting-booking link",
     // One row per (message, kind): the *first* click is the signal; a prospect
     // refreshing the page five times is not five negotiating events.
     dedupeKey: `cta:${referenceId}:${kind}`,
-    signal: kind === "payment" ? "cta_clicked:payment" : "cta_clicked:booking",
+    signal: kind === "payment" ? "cta_clicked:payment" : kind === "telegram" ? "cta_clicked:telegram" : "cta_clicked:booking",
     metadata: { kind, referenceId },
   });
 }
@@ -360,8 +363,16 @@ export async function applyStripeValue(event: StripeEvent): Promise<void> {
     );
 }
 
-/** Human-readable target for a tracked click, resolved from config only. */
-export function ctaTargetFor(kind: CtaKind): string | null {
+/**
+ * Human-readable target for a tracked click, resolved from config only.
+ * `referenceId` is used by the telegram kind alone: it has to travel into the bot's
+ * `start` parameter so the chat that opens can be tied back to this prospect.
+ */
+export function ctaTargetFor(kind: CtaKind, referenceId?: string): string | null {
   if (kind === "booking") return env.calendlyUrl || null;
+  if (kind === "telegram") {
+    if (!env.telegramBotUsername) return null;
+    return telegramDeepLink(env.telegramBotUsername, referenceId);
+  }
   return env.stripePaymentLink || null;
 }

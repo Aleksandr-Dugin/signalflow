@@ -87,9 +87,10 @@ export interface ContactRef {
   verified: boolean;
   origin: ContactOrigin;
   /**
-   * Collected but not sendable: email is still the only outbound channel, so a
-   * phone number or profile link is a coordinate for a human to act on, not a
-   * thing the pipeline may dial. It is stored because the lookup was paid for.
+   * Collected but not directly sendable. Telegram/WhatsApp outreach exists now, but
+   * only fires once the person messages us there first, so a phone number or profile
+   * link is a coordinate for a human to act on, not a thing the pipeline may dial.
+   * It is stored because the lookup was paid for.
    */
   phone: string | null;
   socialUrl: string | null;

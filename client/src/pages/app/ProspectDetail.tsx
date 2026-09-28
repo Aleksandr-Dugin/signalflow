@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "wouter";
 import { toast } from "sonner";
-import { Sparkles, Send, ArrowLeft, ExternalLink, Mail, Phone, Search, UserCheck } from "lucide-react";
+import { Sparkles, Send, ArrowLeft, ExternalLink, Mail, Phone, Search, UserCheck, Ban } from "lucide-react";
 import { trpc } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -49,6 +49,8 @@ function ContactCard({
   // credits vs a per-record vendor bill), and a button that can only throw an
   // error is worse than no button at all.
   const capabilities = trpc.contact.capabilities.useQuery(undefined, { staleTime: 60_000 });
+  // Used only for the phone field's wording here; the channel card queries it too.
+  const channelCaps = trpc.channel.capabilities.useQuery(undefined, { staleTime: 60_000 });
 
   const save = trpc.contact.upsert.useMutation({
     onSuccess: (c) => {
@@ -97,8 +99,8 @@ function ContactCard({
             <div className="mt-1 flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
               <Phone className="h-3.5 w-3.5 shrink-0" />
               <span className="font-mono">{contact.phone}</span>
-              {/* Honest about the gap: recorded, but nothing here can dial it. */}
-              <span className="text-xs">recorded only - email is the only channel we send</span>
+              {/* Honest about the gap: recorded, but nothing here can dial it unprompted. */}
+              <span className="text-xs">recorded only - we can reply here on WhatsApp only if they message us first</span>
             </div>
           ) : null}
           {contact.socialUrl ? (
@@ -170,7 +172,13 @@ function ContactCard({
             onChange={(e) => setPhone(e.target.value)}
             placeholder="+1 415 555 0158"
           />
-          <p className="text-xs text-muted-foreground">Kept for reference - outreach still only sends email.</p>
+          {channelCaps.data?.whatsapp.sender ? (
+            <p className="text-xs text-muted-foreground">
+              Also the number WhatsApp is looked up by, if this person messages us there first.
+            </p>
+          ) : (
+            <p className="text-xs text-muted-foreground">Kept for reference - WhatsApp messaging is not configured.</p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -210,6 +218,152 @@ function ContactCard({
             </Button>
           ) : null}
           {contact ? <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>Cancel</Button> : null}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * How a channel permission came to exist, in the words the operator needs: a row
+ * here is evidence that a person chose this channel, so its provenance is shown
+ * next to it rather than hidden. Unknown sources are printed verbatim rather than
+ * dressed up.
+ */
+const CONSENT_LABELS: Record<string, string> = {
+  "telegram.start": "Opened the chat link we sent",
+  "telegram.inbound": "Messaged the bot first",
+  "whatsapp.inbound": "Messaged our number first",
+};
+
+type ChannelIdentityRow = {
+  id: string;
+  channel: "telegram" | "whatsapp";
+  handle: string | null;
+  consentSource: string;
+  consentAt: string;
+  revokedAt: string | null;
+  lastInboundAt: string | null;
+  canSend: boolean;
+  whyNot: string | null;
+  senderConfigured: boolean;
+};
+
+function ChannelRow({ prospectId, row }: { prospectId: string; row: ChannelIdentityRow }) {
+  const utils = trpc.useUtils();
+  const [text, setText] = useState("");
+
+  const send = trpc.channel.send.useMutation({
+    onSuccess: (res) => {
+      // Three outcomes, three sentences. The provider records a message it could
+      // not deliver, so the toast has to be the place where that distinction survives.
+      if (res.error) toast.error(`Not delivered - ${res.error}`);
+      else if (res.simulated) toast.warning(`Logged, not delivered - this server has no ${row.channel} sender configured.`);
+      else toast.success(`Sent on ${row.channel}`);
+      setText("");
+      void utils.prospect.thread.invalidate();
+      void utils.channel.list.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
+  const revoke = trpc.channel.revoke.useMutation({
+    onSuccess: () => {
+      toast.success("Permission removed - we will not write there again.");
+      void utils.channel.list.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
+  return (
+    <div className="rounded-lg border p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-sm font-medium capitalize">{row.channel}</span>
+        {row.canSend ? (
+          <Badge variant="success">{row.channel === "whatsapp" ? "In their window" : "They opened this"}</Badge>
+        ) : (
+          <Badge variant="warning">Cannot send</Badge>
+        )}
+      </div>
+      <p className="mt-1 text-xs text-muted-foreground">
+        {CONSENT_LABELS[row.consentSource] ?? row.consentSource} · {new Date(row.consentAt).toLocaleDateString()}
+        {row.lastInboundAt ? ` · last wrote ${new Date(row.lastInboundAt).toLocaleDateString()}` : ""}
+        {row.handle ? ` · ${row.handle}` : ""}
+      </p>
+      {row.whyNot ? (
+        <p className="mt-2 rounded-[3px] border border-amber-500/60 bg-amber-500/10 px-2 py-1 text-xs text-amber-500">{row.whyNot}</p>
+      ) : null}
+      {row.canSend && !row.senderConfigured ? (
+        <p className="mt-2 rounded-[3px] border border-amber-500/60 bg-amber-500/10 px-2 py-1 text-xs text-amber-500">
+          Nothing is configured to deliver on {row.channel}, so sending here will be recorded as a simulation.
+        </p>
+      ) : null}
+      <div className="mt-2 space-y-2">
+        <Textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={3}
+          maxLength={4000}
+          placeholder={`Reply on ${row.channel} - this is a conversation, not a campaign`}
+        />
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            className="flex-1"
+            disabled={!text.trim() || !row.canSend || send.isPending}
+            onClick={() => send.mutate({ prospectId, channel: row.channel, text })}
+          >
+            {send.isPending ? <Spinner /> : <Send className="h-4 w-4" />} Send
+          </Button>
+          <Button size="sm" variant="ghost" disabled={revoke.isPending} onClick={() => revoke.mutate({ identityId: row.id })}>
+            <Ban className="h-4 w-4" /> Revoke
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Neither Telegram nor WhatsApp allows cold messaging, so this card can only ever
+ * show channels a person already chose. It reports permission and where it came
+ * from; it deliberately offers no way to start a conversation with someone who has
+ * not written to us there.
+ */
+function ChannelsCard({ prospectId }: { prospectId: string }) {
+  const caps = trpc.channel.capabilities.useQuery(undefined, { staleTime: 60_000 });
+  const identities = trpc.channel.list.useQuery({ prospectId });
+  const rows = identities.data ?? [];
+
+  const telegram = caps.data?.telegram;
+  const whatsapp = caps.data?.whatsapp;
+  const configured = Boolean(
+    telegram && whatsapp && (telegram.sender || telegram.inbound || telegram.entryPoint || whatsapp.sender || whatsapp.inbound || whatsapp.entryPoint),
+  );
+  // No channel credentials and no permissions: messenger outreach does not exist in
+  // this deployment, so say nothing rather than advertise an empty section.
+  if (!configured && rows.length === 0) return null;
+
+  return (
+    <Card>
+      <CardContent className="p-6">
+        <h3 className="mb-1 font-semibold">Messenger channels</h3>
+        <p className="text-xs text-muted-foreground">
+          Telegram and WhatsApp only allow messaging a person who contacted us first. A channel appears here when they do.
+        </p>
+        <div className="mt-3 space-y-3">
+          {rows.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No one has written to us on a messenger yet. Send an email first - a tracked chat link in it is what creates this.
+            </p>
+          ) : (
+            rows.map((r) => <ChannelRow key={r.id} prospectId={prospectId} row={r} />)
+          )}
+          {configured && telegram && !telegram.inbound && telegram.sender ? (
+            <p className="rounded-[3px] border border-destructive/60 bg-destructive/10 px-2 py-1 text-xs text-destructive">
+              Telegram can send but cannot receive: no webhook secret is set, so nobody can ever grant permission and this channel will stay empty.
+            </p>
+          ) : null}
         </div>
       </CardContent>
     </Card>
@@ -311,6 +465,8 @@ export default function ProspectDetail({ id }: { id: string }) {
 
           <ContactCard prospectId={id} contact={p.contact ?? null} live={p.origin === "live"} />
 
+          <ChannelsCard prospectId={id} />
+
           {p.signals.length > 0 && (
             <Card>
               <CardContent className="p-6">
@@ -387,10 +543,14 @@ export default function ProspectDetail({ id }: { id: string }) {
                   // what the loop did, and has to be readable in the history.
                   const delivered = m.status === "sent" || m.status === "delivered" || m.status === "replied";
                   const flagged = m.direction === "outbound" && !delivered;
+                  // A chat message and an email are different permissions with different
+                  // rules, so the timeline names the medium it happened on.
+                  const via = m.channel === "email" ? "" : ` via ${m.channel}`;
+                  const headline = m.subject || (m.channel === "email" ? "(no subject)" : "(chat message)");
                   return (
                     <li key={i} className={"rounded-lg border p-3 " + (m.direction === "inbound" ? "bg-muted/30" : "bg-card")}>
                       <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
-                        <span>{m.direction === "inbound" ? "Prospect" : "You"} · {m.subject ?? "(no subject)"}</span>
+                        <span>{m.direction === "inbound" ? "Prospect" : "You"}{via} · {headline}</span>
                         <span>{new Date(m.at).toLocaleString()}</span>
                       </div>
                       <div className="whitespace-pre-wrap text-sm">{(m.body ?? "").slice(0, 1500)}</div>

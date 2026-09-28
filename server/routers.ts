@@ -10,6 +10,14 @@ import { getEntitlements } from "./services/entitlements";
 import { getBillingStatus } from "./services/billing";
 import { getBillingProvider } from "./services/billingService";
 import { sendOutreachEmail, makeIdempotencyKey, OutreachError } from "./services/outreach";
+import {
+  channelCapability,
+  listProspectIdentities,
+  permissionToSend,
+  revokeChannelIdentity,
+  sendChannelMessage,
+  ChannelError,
+} from "./services/channels";
 import { isProviderConfigured } from "./_core/oauth";
 import { hit } from "./_core/rateLimit";
 import {
@@ -250,6 +258,77 @@ export const appRouter = router({
       }),
   }),
 
+  // Non-email channels (docs/ai-agents.md). Nothing here can create permission to
+  // write to a person: only an inbound event on that platform can, and it arrives at
+  // the endpoints in _core/channelWebhooks.ts. The interface can list what exists,
+  // answer inside an existing conversation, and revoke it — it cannot grant it.
+  channel: router({
+    capabilities: protectedProcedure.query(async () => channelCapability()),
+    list: protectedProcedure
+      .input(z.object({ prospectId: z.string() }))
+      .query(async ({ ctx, input }) => {
+        const workspaceId = await requireWorkspace(ctx);
+        const identities = await listProspectIdentities(workspaceId, input.prospectId);
+        const capability = channelCapability();
+        const now = new Date();
+        return identities.map((identity) => {
+          // Computed server-side and returned as words, because "can we write back"
+          // depends on a platform rule the browser has no business re-deriving.
+          const permission = permissionToSend(identity, { channel: identity.channel, now });
+          return {
+            id: identity.id,
+            channel: identity.channel,
+            handle: identity.handle,
+            consentSource: identity.consentSource,
+            consentAt: identity.consentAt.toISOString(),
+            revokedAt: identity.revokedAt ? identity.revokedAt.toISOString() : null,
+            lastInboundAt: identity.lastInboundAt ? identity.lastInboundAt.toISOString() : null,
+            canSend: permission.allowed,
+            whyNot: permission.allowed ? null : permission.reason,
+            senderConfigured: capability[identity.channel].sender,
+          };
+        });
+      }),
+    send: protectedProcedure
+      .input(
+        z.object({
+          prospectId: z.string(),
+          channel: z.enum(["telegram", "whatsapp"]),
+          text: z.string().min(1).max(4000),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const workspaceId = await requireWorkspace(ctx);
+        const { ok, retryAfterSec } = hit(`channel-send:${workspaceId}`, { windowMs: 60_000, max: 10 });
+        if (!ok) {
+          throw new TRPCError({
+            code: "TOO_MANY_REQUESTS",
+            message: `Channel sending is limited to stay conversational; try again in ${retryAfterSec}s.`,
+          });
+        }
+        try {
+          return await sendChannelMessage({
+            workspaceId,
+            prospectId: input.prospectId,
+            channel: input.channel,
+            text: input.text,
+          });
+        } catch (err) {
+          if (err instanceof ChannelError) throw new TRPCError({ code: "BAD_REQUEST", message: err.message });
+          throw err;
+        }
+      }),
+    // Honoring an opt-out learned anywhere (a phone call, an email, "STOP" written
+    // somewhere we could not parse) must always be possible, so this only removes
+    // permission and never grants it.
+    revoke: protectedProcedure
+      .input(z.object({ identityId: z.string() }))
+      .mutation(async ({ ctx, input }) => {
+        const workspaceId = await requireWorkspace(ctx);
+        return { revoked: await revokeChannelIdentity(workspaceId, input.identityId) };
+      }),
+  }),
+
   contact: router({
     list: protectedProcedure
       .input(z.object({ prospectId: z.string() }))
@@ -264,8 +343,9 @@ export const appRouter = router({
           name: z.string().min(1).max(200),
           title: z.string().max(200).optional(),
           email: z.string().email().max(320),
-          // A phone number can be recorded but not sent to: email is still the
-          // only outbound channel. The UI says so next to the field.
+          // Recorded for reference and for WhatsApp attribution, which only ever binds
+          // a number that messaged us first. Nothing here can be mailed or messaged to
+          // just because a number was typed into this form.
           phone: z.string().max(40).optional(),
         }),
       )

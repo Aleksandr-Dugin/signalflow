@@ -25,6 +25,11 @@ const STRIPE_PAYMENT_LINK = "https://buy.stripe.com/signalflow_smoke";
 const CALENDLY_SECRET = "smoke_calendly_secret_not_real";
 const STRIPE_SECRET = "whsec_smoke_stripe_not_real";
 const INGEST_SECRET = "smoke_ingest_secret_not_real";
+const TG_BOT_TOKEN = "123456789:smoke-bot-token-not-real";
+const TG_BOT_USERNAME = "signalflow_smoke_bot";
+const TG_WEBHOOK_SECRET = "smoke_telegram_webhook_secret_not_real";
+const WA_APP_SECRET = "smoke_whatsapp_app_secret_not_real";
+const WA_VERIFY_TOKEN = "smoke_whatsapp_verify_token_not_real";
 
 let failures = 0;
 function check(label, passed, detail) {
@@ -33,12 +38,13 @@ function check(label, passed, detail) {
 }
 
 /** Start the server and resolve once it is listening. */
-async function startServer() {
+async function startServer(overrides = {}, port = PORT) {
+  const base = `http://127.0.0.1:${port}`;
   const env = {
     ...process.env,
     NODE_ENV: "test",
-    PORT: String(PORT),
-    PUBLIC_APP_URL: BASE,
+    PORT: String(port),
+    PUBLIC_APP_URL: base,
     CALENDLY_URL,
     STRIPE_PAYMENT_LINK,
     CALENDLY_SIGNING_SECRET: CALENDLY_SECRET,
@@ -46,6 +52,16 @@ async function startServer() {
     // Set explicitly rather than inherited: the SES checks below assert a
     // refusal, and an empty or shell-inherited value would change its meaning.
     REPLY_INGEST_SECRET: INGEST_SECRET,
+    // Configured so the messenger checks below exercise the real auth contract;
+    // the fail-closed case gets its own boot at the end with these blanked.
+    TELEGRAM_BOT_TOKEN: TG_BOT_TOKEN,
+    TELEGRAM_BOT_USERNAME: TG_BOT_USERNAME,
+    TELEGRAM_WEBHOOK_SECRET: TG_WEBHOOK_SECRET,
+    WHATSAPP_ACCESS_TOKEN: "smoke-wa-token",
+    WHATSAPP_PHONE_NUMBER_ID: "smoke-wa-phone-id",
+    WHATSAPP_APP_SECRET: WA_APP_SECRET,
+    WHATSAPP_VERIFY_TOKEN: WA_VERIFY_TOKEN,
+    ...overrides,
   };
   // Several checks below assert that a provider must be asked to *retry* when we
   // cannot persist. A database inherited from the shell would silently turn those
@@ -66,7 +82,7 @@ async function startServer() {
   child.stderr.on("data", (d) => (output += d.toString()));
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
-    if (output.includes("listening on")) return { child, output };
+    if (output.includes("listening on")) return { child, output, base };
     if (child.exitCode !== null) break;
     await new Promise((r) => setTimeout(r, 250));
   }
@@ -118,6 +134,16 @@ async function main() {
     "payment click redirects to the configured Stripe link",
     payment.status === 302 && payment.headers.get("location") === STRIPE_PAYMENT_LINK,
     `${payment.status} -> ${payment.headers.get("location")}`,
+  );
+
+  // The messenger leg of the funnel: a click on the chat link is the only thing that
+  // can start a channel conversation, and it must carry our reference to Telegram.
+  const telegramCta = await fetch(`${BASE}/api/track/cta/ref_smoke/telegram`, { redirect: "manual" });
+  check(
+    "telegram click redirects to the bot with our reference as the start parameter",
+    telegramCta.status === 302 &&
+      telegramCta.headers.get("location") === `https://t.me/${TG_BOT_USERNAME}?start=ref_smoke`,
+    `${telegramCta.status} -> ${telegramCta.headers.get("location")}`,
   );
 
   // The path parameter must never be interpretable as a destination.
@@ -280,6 +306,93 @@ async function main() {
     String(landing.status),
   );
 
+  // ── Messenger inbound authentication ───────────────────────────────
+  // These are the only endpoints that create permission to write to a person, so an
+  // unverified POST must never be able to invent a consent record for a stranger.
+  const tgUpdate = JSON.stringify({
+    update_id: 1,
+    message: { from: { id: 555, username: "smoke", is_bot: false }, chat: { id: 555 }, text: "/start ref_smoke" },
+  });
+  const tgPlain = { "x-telegram-bot-api-secret-token": TG_WEBHOOK_SECRET };
+
+  const tgNoHeader = await post("/api/channels/telegram", tgUpdate);
+  check("Telegram update with no secret header is refused", tgNoHeader.status === 401, String(tgNoHeader.status));
+  const tgWrongHeader = await post("/api/channels/telegram", tgUpdate, { "x-telegram-bot-api-secret-token": "guess" });
+  check("Telegram update with the wrong secret is refused", tgWrongHeader.status === 401, String(tgWrongHeader.status));
+
+  const tgAuthed = await post("/api/channels/telegram", tgUpdate, tgPlain);
+  const tgAuthedBody = await tgAuthed.json().catch(() => ({}));
+  check(
+    "authenticated Telegram update passes auth and a missing DB asks Telegram to retry",
+    tgAuthed.status === 503 && tgAuthedBody.reason === "db_unavailable",
+    `${tgAuthed.status} ${JSON.stringify(tgAuthedBody)}`,
+  );
+
+  // A bot cannot give consent, and a public channel post is an audience rather than a
+  // person. Both are acknowledged (200) instead of retried, because retrying them
+  // forever would hide the updates that matter.
+  const tgFromBot = await post(
+    "/api/channels/telegram",
+    JSON.stringify({ update_id: 2, message: { from: { id: 1, is_bot: true }, text: "hi" } }),
+    tgPlain,
+  );
+  const tgFromBotBody = await tgFromBot.json().catch(() => ({}));
+  check(
+    "a bot's message cannot grant consent and is acknowledged without a database",
+    tgFromBot.status === 200 && tgFromBotBody.reason === "not_a_person_message",
+    `${tgFromBot.status} ${JSON.stringify(tgFromBotBody)}`,
+  );
+
+  const waBody = JSON.stringify({
+    object: "whatsapp_business_account",
+    entry: [
+      {
+        changes: [
+          {
+            field: "messages",
+            value: {
+              messaging_product: "whatsapp",
+              contacts: [{ profile: { name: "Smoke" }, wa_id: "15550001111" }],
+              messages: [{ id: "wamid.SMOKE", from: "15550001111", type: "text", text: { body: "hello" } }],
+            },
+          },
+        ],
+      },
+    ],
+  });
+  const waSignature = `sha256=${createHmac("sha256", WA_APP_SECRET).update(waBody, "utf8").digest("hex")}`;
+
+  const waNoSig = await post("/api/channels/whatsapp", waBody);
+  check("WhatsApp webhook with no signature is refused", waNoSig.status === 401, String(waNoSig.status));
+  const waBadSig = await post("/api/channels/whatsapp", waBody, { "x-hub-signature-256": `sha256=${"0".repeat(64)}` });
+  check("WhatsApp webhook with a forged signature is refused", waBadSig.status === 401, String(waBadSig.status));
+  // Signed over the original body, sent with a modified one: the signature must be over
+  // what was parsed, not merely present.
+  const waTampered = await post("/api/channels/whatsapp", waBody.replace("15550001111", "15559999999"), {
+    "x-hub-signature-256": waSignature,
+  });
+  check("WhatsApp signature does not carry over to a modified body", waTampered.status === 401, String(waTampered.status));
+  const waAuthed = await post("/api/channels/whatsapp", waBody, { "x-hub-signature-256": waSignature });
+  const waAuthedBody = await waAuthed.json().catch(() => ({}));
+  check(
+    "signed WhatsApp webhook passes auth and a missing DB asks Meta to retry",
+    waAuthed.status === 503 && waAuthedBody.reason === "db_unavailable",
+    `${waAuthed.status} ${JSON.stringify(waAuthedBody)}`,
+  );
+
+  const handshake = await fetch(
+    `${BASE}/api/channels/whatsapp?hub.mode=subscribe&hub.verify_token=${WA_VERIFY_TOKEN}&hub.challenge=chal-42`,
+  );
+  check(
+    "the subscription handshake echoes the challenge for the configured token",
+    handshake.status === 200 && (await handshake.text()) === "chal-42",
+    String(handshake.status),
+  );
+  const handshakeWrong = await fetch(
+    `${BASE}/api/channels/whatsapp?hub.mode=subscribe&hub.verify_token=guessed&hub.challenge=chal-42`,
+  );
+  check("the handshake refuses a guessed verify token", handshakeWrong.status === 403, String(handshakeWrong.status));
+
   // The legal pages are SPA routes with no server handler, and `/api` has a
   // catch-all 404 mounted: reaching them proves the SPA fallback does not swallow
   // them. A policy nobody can load is the same as no policy.
@@ -293,9 +406,58 @@ async function main() {
     );
   }
 
+  await checkChannelsFailClosed();
   await stopServer(child);
   console.log(`\n${failures === 0 ? "smoke: all checks passed" : `smoke: ${failures} check(s) FAILED`}`);
   process.exit(failures === 0 ? 0 : 1);
+}
+
+/**
+ * A second boot carrying no messenger credentials at all - the state every fresh
+ * deployment starts in, including this repository. Refusing the inbound leg here is
+ * what makes configuring a bot later safe: an unverified "/start" would otherwise be
+ * a fabricated permission to message whoever's id was supplied.
+ */
+async function checkChannelsFailClosed() {
+  const port = PORT + 1;
+  const { child, base } = await startServer(
+    {
+      TELEGRAM_BOT_TOKEN: "",
+      TELEGRAM_BOT_USERNAME: "",
+      TELEGRAM_WEBHOOK_SECRET: "",
+      WHATSAPP_ACCESS_TOKEN: "",
+      WHATSAPP_PHONE_NUMBER_ID: "",
+      WHATSAPP_APP_SECRET: "",
+      WHATSAPP_VERIFY_TOKEN: "",
+    },
+    port,
+  );
+  const postTo = (url, body) =>
+    fetch(`${base}${url}`, { method: "POST", headers: { "content-type": "application/json" }, body });
+
+  const tg = await postTo("/api/channels/telegram", JSON.stringify({ update_id: 1, message: { from: { id: 5 }, text: "/start x" } }));
+  check("Telegram inbound is refused with no webhook secret configured", tg.status === 503, String(tg.status));
+
+  const wa = await postTo("/api/channels/whatsapp", waEmptyBody());
+  check("WhatsApp inbound is refused with no app secret configured", wa.status === 503, String(wa.status));
+
+  const hs = await fetch(`${base}/api/channels/whatsapp?hub.mode=subscribe&hub.verify_token=anything&hub.challenge=9`);
+  check("the WhatsApp handshake cannot be satisfied with an unconfigured token", hs.status === 403, String(hs.status));
+
+  // No bot username means no honest link to offer: the CTA must fail rather than send
+  // someone to a chat that cannot be attributed.
+  const cta = await fetch(`${base}/api/track/cta/ref_smoke/telegram`, { redirect: "manual" });
+  check(
+    "telegram CTA has no destination to offer when no bot is configured",
+    cta.status === 404 && !cta.headers.get("location"),
+    `${cta.status} -> ${cta.headers.get("location")}`,
+  );
+
+  await stopServer(child);
+}
+
+function waEmptyBody() {
+  return JSON.stringify({ object: "whatsapp_business_account", entry: [] });
 }
 
 main().catch((err) => {

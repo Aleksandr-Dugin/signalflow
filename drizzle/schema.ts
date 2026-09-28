@@ -247,10 +247,10 @@ export const contacts = mysqlTable(
     name: varchar("name", { length: 200 }).notNull().default(""),
     title: varchar("title", { length: 200 }),
     email: varchar("email", { length: 320 }),
-    // Non-email channels cannot be *sent* on yet (email is the only outbound
-    // channel; see docs/ai-agents.md), but a number or profile returned by an
-    // enrichment provider needs an honest home the day it arrives. Dropping it
-    // loses money already spent on the lookup; smuggling it into `email` or
+    // A number or profile returned by an enrichment provider needs an honest home
+    // the day it arrives. Storing one grants nothing: messenger sending requires a
+    // `channel_identities` row created by that person writing to us first. Dropping
+    // it loses money already spent on the lookup; smuggling it into `email` or
     // `sourceUrl` corrupts the funnel.
     phone: varchar("phone", { length: 40 }),
     socialUrl: varchar("social_url", { length: 1024 }),
@@ -408,12 +408,16 @@ export const outreachMessages = mysqlTable(
     prospectId: varchar("prospect_id", { length: 36 })
       .notNull()
       .references(() => prospects.id, { onDelete: "cascade" }),
+    // The address this message was addressed to *on its channel*: an email for
+    // email, a platform id prefixed with the scheme for the others. NotNull on
+    // purpose - a message with no recipient is not a message.
     recipientEmail: varchar("recipient_email", { length: 320 }).notNull(),
-    // Single-value enum on purpose. Email is the only channel that can actually
-    // be sent today, and the type must say so: a varchar would let code quietly
-    // claim a message was delivered over a channel that does not exist. Adding
-    // SMS/Telegram/WhatsApp is a deliberate widening here plus a real provider.
-    channel: mysqlEnum("channel", ["email"])
+    // Widened from the single-value enum that said "email is the only channel
+    // that exists". It was honest while only an SMTP sender did; adding a value
+    // here without a provider would have been the opposite kind of dishonesty,
+    // so this changed together with services/channels.ts - and a non-email row can
+    // still only be written when a consented channel identity exists.
+    channel: mysqlEnum("channel", ["email", "telegram", "whatsapp"])
       .notNull()
       .default("email"),
     recipientName: varchar("recipient_name", { length: 200 }),
@@ -498,6 +502,53 @@ export const emailEvents = mysqlTable(
   (t) => ({
     dedupeIdx: uniqueIndex("email_events_dedupe_unique").on(t.workspaceId, t.dedupeKey),
     prospectIdx: index("email_events_prospect_idx").on(t.prospectId),
+  }),
+);
+
+// ── Non-email channels, and the consent that makes them sendable ──────────────
+// Telegram and WhatsApp are not cold-outreach channels: neither platform lets a
+// business write to a person who has not contacted it first (Telegram: the user
+// must start the chat with the bot; WhatsApp: a 24-hour reply window, or a
+// pre-approved template to an opted-in number). So the honest shape of this
+// feature is: email finds the person, a tracked link starts the conversation
+// there, and *that* is what opens a second channel.
+//
+// A row here therefore exists only as evidence of permission. `consentAt` is
+// written by the platform's own inbound event (the person pressing /start, or
+// sending a WhatsApp message), never by an operator wanting a channel to be
+// available - which is precisely the distinction this table exists to enforce.
+export const channelEnumValues = ["telegram", "whatsapp"] as const;
+
+export const channelIdentities = mysqlTable(
+  "channel_identities",
+  {
+    id: varchar("id", { length: 36 }).primaryKey(),
+    workspaceId: varchar("workspace_id", { length: 36 })
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    prospectId: varchar("prospect_id", { length: 36 })
+      .notNull()
+      .references(() => prospects.id, { onDelete: "cascade" }),
+    channel: mysqlEnum("channel", channelEnumValues).notNull(),
+    // Platform-side identifier: Telegram user id, WhatsApp phone id. Opaque to
+    // us, stable for them, and the key the provider API is called with.
+    externalId: varchar("external_id", { length: 128 }).notNull(),
+    // Display handle when the platform exposes one (@username, or the number).
+    handle: varchar("handle", { length: 320 }),
+    // How permission was obtained, so the record can answer "why may you write
+    // to this person here?": "telegram.start", "whatsapp.inbound", "manual".
+    consentSource: varchar("consent_source", { length: 64 }).notNull(),
+    consentAt: timestamp("consent_at", { mode: "date" }).notNull(),
+    // An in-channel STOP or a revoked consent stops sends immediately; the row is
+    // kept because the revocation is itself the fact that must survive.
+    revokedAt: timestamp("revoked_at", { mode: "date" }),
+    lastInboundAt: timestamp("last_inbound_at", { mode: "date" }),
+    createdAt: ts("created_at"),
+    updatedAt: ts("updated_at"),
+  },
+  (t) => ({
+    identityIdx: uniqueIndex("channel_identity_unique").on(t.workspaceId, t.channel, t.externalId),
+    prospectIdx: index("channel_identity_prospect_idx").on(t.prospectId),
   }),
 );
 

@@ -30,6 +30,7 @@ import { ingestEmailEvent, handleUnsubscribeByRef } from "../services/replies";
 import { startJobWorker, stopJobWorker, workerHealth } from "../services/jobs";
 import { mountEspWebhooks } from "./espWebhooks";
 import { mountConversionEndpoints } from "./conversionWebhooks";
+import { mountChannelEndpoints } from "./channelWebhooks";
 import { assertSchemaReady } from "./schemaCheck";
 // Side-effect import: registers "reply.followup" and "campaign.discovery" onto
 // the job worker so autonomous AI follow-up and scheduled discovery actually run.
@@ -278,6 +279,11 @@ mountEspWebhooks(app);
 
 // Tracked CTA redirects + Calendly / Stripe conversion callbacks.
 mountConversionEndpoints(app);
+
+// Telegram / WhatsApp inbound. These are the endpoints that create permission to
+// write to a person on a second channel, so both refuse everything until their
+// verification secret is configured (services/channels.ts).
+mountChannelEndpoints(app);
 
 // ── tRPC ────────────────────────────────────────────────────────────────────
 app.use(

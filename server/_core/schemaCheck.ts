@@ -85,12 +85,32 @@ const REQUIRED: ColumnRequirement[] = [
     fix: "ALTER TABLE `contacts` ADD COLUMN `social_url` varchar(1024);",
   },
   {
-    // The channel column is what makes "we only send email" a fact the database
-    // enforces rather than a comment in a doc.
+    // The channel column is what makes "this message was sent on X" a fact the
+    // database enforces rather than a comment in a doc. It widened from the
+    // single-value enum once a second sender existed; an old database still on
+    // enum('email') would reject a Telegram row with a truncated-enum error in the
+    // middle of a send, so the requirement is the value set, not just the column.
     table: "outreach_messages",
     column: "channel",
-    enumContains: ["email"],
-    fix: "ALTER TABLE `outreach_messages` ADD COLUMN `channel` enum('email') NOT NULL DEFAULT 'email';",
+    enumContains: ["email", "telegram", "whatsapp"],
+    fix:
+      "ALTER TABLE `outreach_messages` MODIFY COLUMN `channel` enum('email','telegram','whatsapp') NOT NULL DEFAULT 'email';",
+  },
+  {
+    // Permission for the non-email channels. There is no such table => there is no
+    // consented recipient => nothing may be sent on Telegram or WhatsApp. The
+    // service treats that as a hard refusal, so a missing table degrades to "only
+    // email works" rather than to sending without permission.
+    table: "channel_identities",
+    column: "externalId",
+    fix:
+      "CREATE TABLE `channel_identities` (`id` varchar(36) NOT NULL, `workspace_id` varchar(36) NOT NULL, " +
+      "`prospect_id` varchar(36) NOT NULL, `channel` enum('telegram','whatsapp') NOT NULL, " +
+      "`external_id` varchar(128) NOT NULL, `handle` varchar(320), `consent_source` varchar(64) NOT NULL, " +
+      "`consent_at` timestamp NOT NULL, `revoked_at` timestamp, `last_inbound_at` timestamp, " +
+      "`created_at` timestamp DEFAULT (now()), `updated_at` timestamp DEFAULT (now()), " +
+      "CONSTRAINT `channel_identities_id` PRIMARY KEY(`id`), " +
+      "CONSTRAINT `channel_identity_unique` UNIQUE(`workspace_id`,`channel`,`external_id`));",
   },
   {
     // The master autonomy switch. A missing table here is not a missing feature:

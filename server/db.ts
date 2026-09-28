@@ -318,7 +318,8 @@ function candidateContact(c: CompanyCandidate): ContactInput | null {
 /**
  * A record a data vendor returned. The phone number and profile link are kept
  * because the lookup was paid for and dropping the row would waste it — but
- * nothing here pretends they are sendable: email is still the only channel.
+ * nothing here pretends they are directly sendable: messenger outreach only fires
+ * once the person messages us there first.
  */
 function providerContact(p: EnrichedPerson): ContactInput | null {
   if (!p.email) return null;
@@ -1055,7 +1056,24 @@ export type ThreadMessage = {
    * send has to stay visible instead of collapsing into one identical bubble.
    */
   status: string | null;
+  /**
+   * Which medium the message travelled on: `email`, `telegram` or `whatsapp`. A
+   * messenger reply must not look identical to an email reply — the thread is what
+   * an operator uses to decide whether writing back again is even allowed there.
+   */
+  channel: string;
 };
+
+/**
+ * Inbound channel messages are stored in email_events under a `telegram:<id>` /
+ * `whatsapp:<id>` address, so that the reply classifier and the thread keep working
+ * without learning about each platform. The medium is therefore read back out of that
+ * address rather than from a column that does not exist.
+ */
+function mediumOf(fromAddress: string | null | undefined): string {
+  const scheme = /^(telegram|whatsapp):/.exec(fromAddress ?? "");
+  return scheme ? scheme[1]! : "email";
+}
 
 export async function getProspectThread(
   workspaceId: string,
@@ -1080,6 +1098,7 @@ export async function getProspectThread(
         subject: schema.outreachMessages.subject,
         body: schema.outreachMessages.body,
         status: schema.outreachMessages.status,
+        channel: schema.outreachMessages.channel,
         error: schema.outreachMessages.error,
         at: schema.outreachMessages.sentAt,
         queuedAt: schema.outreachMessages.createdAt,
@@ -1105,6 +1124,7 @@ export async function getProspectThread(
       body: r.bodyText ?? null,
       at: r.createdAt ?? new Date(),
       status: null,
+      channel: mediumOf(r.fromAddress),
     })),
     ...sentRows.map((r) => ({
       direction: "outbound" as const,
@@ -1114,6 +1134,7 @@ export async function getProspectThread(
       // The provider's own note is what distinguishes a real delivery from a
       // simulation, and it only exists on the row - pass it through verbatim.
       status: r.error ? `${r.status}: ${r.error}` : r.status,
+      channel: r.channel,
     })),
   ];
   return rows.sort((a, b) => a.at.getTime() - b.at.getTime()).slice(-limit);

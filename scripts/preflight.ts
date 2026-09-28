@@ -269,6 +269,98 @@ function checkConversions(): void {
   );
 }
 
+/**
+ * Messenger channels. Optional by design — neither platform permits cold outreach, so
+ * these exist to answer someone who chose to write to us there, and the funnel works
+ * without them. What is *not* optional is a half-configured channel: on these platforms
+ * the inbound leg is the only thing that can ever create permission to send, so a sender
+ * without it is not an idle channel but a dead one, and only the operator can tell which
+ * was intended.
+ */
+function checkChannels(): void {
+  const origin = env.publicUrl.replace(/\/$/, "");
+  const telegramAny = Boolean(env.telegramBotToken || env.telegramWebhookSecret || env.telegramBotUsername);
+  const whatsappAny = Boolean(
+    env.whatsappAccessToken || env.whatsappPhoneNumberId || env.whatsappAppSecret || env.whatsappVerifyToken,
+  );
+
+  if (!telegramAny && !whatsappAny) {
+    record(
+      "ok",
+      "channels",
+      "No messenger channel configured — outreach is email-only, which is a complete pipeline. Set the TELEGRAM_* or WHATSAPP_* variables to answer prospects who prefer chat.",
+    );
+    return;
+  }
+
+  if (telegramAny) {
+    if (!env.telegramBotToken) {
+      record(
+        "fail",
+        "channels",
+        "Telegram variables are set but TELEGRAM_BOT_TOKEN is empty — nothing can be sent, and the webhook has no bot to belong to.",
+      );
+    } else if (!env.telegramWebhookSecret) {
+      record(
+        "fail",
+        "channels",
+        "TELEGRAM_BOT_TOKEN set without TELEGRAM_WEBHOOK_SECRET — /api/channels/telegram refuses every update, so no one can ever grant permission and the channel stays empty however many links go out.",
+      );
+    } else {
+      record(
+        "ok",
+        "channels",
+        `Telegram can receive and send. Register the webhook once the app is on a public HTTPS origin: POST ${origin}/api/channels/telegram (see .env.example for the setWebhook curl).`,
+      );
+      if (!env.telegramBotUsername) {
+        record(
+          "warn",
+          "channels",
+          "Telegram works but TELEGRAM_BOT_USERNAME is unset, so no chat link can be built and none appears in a tracked CTA. The channel is reachable only by someone who finds the bot themselves.",
+        );
+      }
+    }
+  }
+
+  if (whatsappAny) {
+    const sender = Boolean(env.whatsappAccessToken && env.whatsappPhoneNumberId);
+    if (!sender) {
+      record(
+        "fail",
+        "channels",
+        "WhatsApp variables are set but WHATSAPP_ACCESS_TOKEN / WHATSAPP_PHONE_NUMBER_ID are incomplete — inbound consent may be recorded that nothing can ever answer.",
+      );
+    } else if (!env.whatsappAppSecret) {
+      record(
+        "fail",
+        "channels",
+        "WhatsApp sender configured without WHATSAPP_APP_SECRET — /api/channels/whatsapp cannot verify Meta's signature and refuses everything, so the reply window can never open.",
+      );
+    } else {
+      record(
+        "ok",
+        "channels",
+        `WhatsApp Cloud API configured. Subscribe the webhook at ${origin}/api/channels/whatsapp (field: messages) with a verify token.`,
+      );
+      if (!env.whatsappVerifyToken) {
+        record(
+          "warn",
+          "channels",
+          "WHATSAPP_VERIFY_TOKEN is unset, so Meta's subscription handshake fails and the webhook cannot be created through the UI.",
+        );
+      }
+    }
+  }
+
+  // Informational, not a warning: this is what a working configuration enforces, and the
+  // manual half of proving it lives in docs/verification.md.
+  record(
+    "ok",
+    "channels",
+    `Free-text replies are permitted for ${Math.min(env.messengerWindowHours, 24)}h after the prospect's last inbound message (MESSENGER_WINDOW_HOURS, capped at the platform's own 24).`,
+  );
+}
+
 function checkLegal(): void {
   if (legalIsUnfiled()) {
     const placeholders = Object.entries(CONTROLLER)
@@ -287,11 +379,12 @@ async function main(): Promise<void> {
   await checkSendingDomain();
   checkPipeline();
   checkConversions();
+  checkChannels();
   checkLegal();
 
   // Grouped in launch order rather than alphabetically: the operator reads this top to
   // bottom and fixes it top to bottom, so "database" must not arrive after "auth".
-  const areas = ["urls", "auth", "database", "sending domain", "outbound", "inbound", "AI", "discovery", "enrichment", "conversions", "legal"];
+  const areas = ["urls", "auth", "database", "sending domain", "outbound", "inbound", "AI", "discovery", "enrichment", "conversions", "channels", "legal"];
   const order: Record<Grade, number> = { fail: 0, warn: 1, ok: 2 };
   const sorted = results.slice().sort(
     (a, b) =>

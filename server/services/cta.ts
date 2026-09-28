@@ -13,17 +13,23 @@
 // Security note: the redirect target is always resolved server-side from env
 // config for the given kind. The path parameter is a classification, never a
 // URL — so this endpoint cannot be turned into an open redirect.
-export type CtaKind = "booking" | "payment";
+//
+// `telegram` is a different kind of target from the other two: it does not leave our
+// funnel for a vendor, it opens a chat on a platform where that person can then be
+// written to again. The `ref` travels with it as the bot's `start` parameter, which is
+// what lets the inbound event be attributed to the prospect the email was meant for
+// (services/channels.ts).
+export type CtaKind = "booking" | "payment" | "telegram";
 
 export interface CtaLink {
   kind: CtaKind;
   url: string;
 }
 
-export const CTA_KINDS: readonly CtaKind[] = ["booking", "payment"];
+export const CTA_KINDS: readonly CtaKind[] = ["booking", "payment", "telegram"];
 
 export function isCtaKind(value: unknown): value is CtaKind {
-  return value === "booking" || value === "payment";
+  return value === "booking" || value === "payment" || value === "telegram";
 }
 
 /** Where a click on `kind` for message `referenceId` should be sent. */
@@ -64,9 +70,15 @@ export function trackCtaLinks(
 export function ctaLinksFromConfig(config: {
   calendlyUrl?: string;
   stripePaymentLink?: string;
+  telegramBotUsername?: string;
 }): CtaLink[] {
   const links: CtaLink[] = [];
   if (config.calendlyUrl) links.push({ kind: "booking", url: config.calendlyUrl });
   if (config.stripePaymentLink) links.push({ kind: "payment", url: config.stripePaymentLink });
+  // The URL a draft would contain is the plain bot link; rewriting it into the tracked
+  // path is what makes the eventual /start attributable.
+  if (config.telegramBotUsername) {
+    links.push({ kind: "telegram", url: `https://t.me/${config.telegramBotUsername.replace(/^@/, "")}` });
+  }
   return links;
 }

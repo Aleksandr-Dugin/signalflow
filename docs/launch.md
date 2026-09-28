@@ -72,6 +72,8 @@ before you believe the SPF/DKIM/DMARC checkmarks.
 | `ENRICHMENT_PROVIDER` + `HUNTER_API_KEY` / `APOLLO_API_KEY` | The only compliant route to a named person, phone and licensed profile when the company's own pages name nobody. Empty = nothing is ever bought. |
 | `ENRICHMENT_AUTO_DISCOVER` | Whether an unattended run may spend money. Off means the autopilot never buys anything — leave it off until you have watched the credit meter on manual lookups. |
 | `ENRICHMENT_MAX_PEOPLE` | Records per lookup. Apollo bills per person (1–9 credits), so this is a spend cap. |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_WEBHOOK_SECRET` + `TELEGRAM_BOT_USERNAME` | Optional. Answering prospects who prefer chat. All three are needed: without the secret nobody can ever grant permission, and without the username no link can be built. See §4. |
+| `WHATSAPP_ACCESS_TOKEN` + `WHATSAPP_PHONE_NUMBER_ID` + `WHATSAPP_APP_SECRET` | Optional, and needs a Meta business-verified app. Free-form replies are allowed for 24 h after the prospect writes; templates are never sent. |
 
 This is a decision, not a configuration: buying contact data costs money per person and
 puts a name in front of an automated sender. Decide deliberately, and leave
@@ -91,11 +93,22 @@ cannot be spoofed — but "refusing everything" also looks like "nobody replied"
 | `POST /api/replies/webhook/ses` | SNS subscription for the receiving mailbox | `?key=<REPLY_INGEST_SECRET>` (SNS cannot send an HMAC of our choosing; the SES certificate signature is **not** yet verified) | as above |
 | `POST /api/conversions/calendly` | Calendly → event notification, `invitee.created` (v2) | `CALENDLY_SIGNING_SECRET` | `meeting_booked` |
 | `POST /api/conversions/stripe` | Stripe → Payment Link webhook, `checkout.session.completed` | `STRIPE_WEBHOOK_SECRET` | `won` |
+| `POST /api/channels/telegram` | `setWebhook` on the bot (curl in `.env.example`) | `X-Telegram-Bot-Api-Secret-Token`, echoed from `TELEGRAM_WEBHOOK_SECRET` | permission to write on Telegram, and the reply itself |
+| `GET` + `POST /api/channels/whatsapp` | Meta app → Webhooks field `messages` | handshake `hub.verify_token`; each body HMAC'd with `WHATSAPP_APP_SECRET` | permission to write on WhatsApp, and the reply itself |
+
+The two channel endpoints are the only writers of *permission* in the system, which is
+why they are the strictest: nothing is accepted before their secret is configured, and
+no request can create a consent row for somebody who did not write to us. They are
+optional — the funnel is complete without them.
 
 Outbound side, configured from the app's own origin:
 
-- `/api/track/cta/<ref>/<booking|payment>` — the rewritten CTA links. Only a click
-  through these counts as evidence, so `PUBLIC_APP_URL` must be the public origin.
+- `/api/track/cta/<ref>/<booking|payment|telegram>` — the rewritten CTA links. Only a
+  click through these counts as evidence, so `PUBLIC_APP_URL` must be the public origin.
+  The `telegram` leg is the one that turns an email reader into a chat: it redirects to
+  `t.me/<bot>?start=<ref>`, and the click itself advances no stage. It is rewritten, never
+  inserted — a draft only gets a tracked chat link if the message already names the bot,
+  so offering Telegram to a prospect is a human decision made while reading the draft.
 - `POST /api/replies/unsubscribe` — RFC 8058 one-click. The `ref` in the URI is the
   capability token; nothing to register.
 
@@ -106,10 +119,12 @@ prove you registered them.
 
 1. `pnpm build` → `NODE_ENV=production TRUST_PROXY=true pnpm start` behind TLS.
 2. Read the boot log. `assertRuntimeConfig()` refuses to start a production server with a
-   missing `DATABASE_URL` or the example `JWT_SECRET`, then **warns** about the three
+   missing `DATABASE_URL` or the example `JWT_SECRET`, then **warns** about the
    half-configurations that break silently: SMTP without a postal address,
-   `TRUST_PROXY` off, `REPLY_INGEST_SECRET` unset. A warning at boot is cheaper than a
-   campaign nobody received.
+   `TRUST_PROXY` off, `REPLY_INGEST_SECRET` unset, and a messenger channel with a sender
+   but no inbound verification (on those platforms the inbound leg is the only thing that
+   can ever create permission, so a sender without it is a dead channel rather than an
+   idle one). A warning at boot is cheaper than a campaign nobody received.
 3. Point your uptime monitor at `GET /api/health`. It reads no database, so it can be
    polled as often as you like. It answers **503 in exactly one case**: the queue worker
    claims to be running and has gone silent — the one state a restart fixes. A deep
@@ -158,6 +173,11 @@ also the moment the docs get corrected.
     suppressed, that a later send attempt to it stops at status `suppressed` instead of
     delivering, and — in Settings → Data subject requests — that the export returns the
     rehearsal rows and the erasure deletes them while the suppression entry survives.
+11. Only if a messenger channel is configured: put the plain `https://t.me/<bot>` link in a
+    message to your own test address, click it, and press Start in Telegram. Then confirm
+    the prospect page shows a Telegram row with the consent date, that the stage did **not**
+    move, that sending without that row is refused in words, that `STOP` revokes it, and
+    that the chat appears in the Conversation labelled as Telegram.
 
 If step 9 shows a stage that came from anything other than a provider callback, stop:
 the funnel is reporting theatre again.
@@ -191,8 +211,10 @@ because a sender reputation takes weeks to build and one bad burst to lose.
 
 - **Billing.** `BILLING_PROVIDER` is `mock` until the Platega credentials land; plans and
   entitlements are enforced locally either way. Handled separately.
-- **Channels other than email.** Phone numbers and licensed profile URLs can be stored
-  and are displayed, but there is no Telegram/WhatsApp/SMS sender — `outreach.channel`
-  only ever says `email`, and the UI says so rather than implying otherwise.
+- **Channels other than email, beyond the reply path.** Telegram and WhatsApp may only be
+  written to after that person messaged us there (`docs/ai-agents.md`, "Answering on the
+  prospect's terms"); nothing here can grant that permission from a stored number. SMS and
+  ringless calls do not exist at all, and social profiles are stored but never posted to.
+  Billing is listed above; these are the other things this runbook does not cover.
 - **SES authenticity.** The inbound route authenticates possession of the shared secret,
   not that Amazon sent the request; verifying the SNS signature is still outstanding.

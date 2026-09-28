@@ -89,6 +89,10 @@ describe("legal documents", () => {
     expect(privacy).toContain("origin"); // contacts.origin records where an address came from
     expect(privacy).toContain("do not scrape social networks"); // ToS boundary
     expect(privacy).toContain("never constructs an address from a name and a domain pattern"); // contactExtraction reads pages only
+    // Messenger channels: the policy promises a consent row is required, which is
+    // exactly what permissionToSend() enforces before any provider call.
+    expect(privacy).toContain("consent row");
+    expect(privacy).toContain("you started one");
     expect(privacy).toContain("no advertising or analytics cookies");
     expect(privacy).toContain("erasure"); // the Settings path this file tests alongside
   });

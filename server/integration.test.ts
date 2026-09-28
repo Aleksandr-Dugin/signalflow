@@ -26,6 +26,13 @@ import { ingestEmailEvent } from "./services/replies";
 import { handleCalendlyEvent, handleStripeEvent, applyStripeValue, recordCtaClick } from "./services/conversions";
 import { enrichProspectContact, getProspectThread, listContacts, upsertManualContact } from "./db";
 import { smtpConfigured } from "./services/email";
+import {
+  listProspectIdentities,
+  permissionToSend,
+  recordChannelInbound,
+  sendChannelMessage,
+  type ChannelInbound,
+} from "./services/channels";
 import { addressWasForgotten, eraseSubjectData, exportSubjectData } from "./services/gdpr";
 
 const databaseConfigured = Boolean(process.env.DATABASE_URL);
@@ -513,7 +520,8 @@ suite("autonomous loop against a real database", () => {
     expect(listed.map((c) => c.id)).toContain(saved.id);
 
     // And the send path states the channel it used instead of inheriting a
-    // default, so "email is the only channel" is a fact the row asserts.
+    // default. The messenger test below depends on that column being real: it is
+    // how a chat reply is told apart from an emailed one in the same table.
     const [sent] = await db!
       .select({ channel: schema.outreachMessages.channel })
       .from(schema.outreachMessages)
@@ -524,6 +532,116 @@ suite("autonomous loop against a real database", () => {
     // Hand the prospect back to the contact the rest of the loop is built around.
     await db!.update(schema.prospects).set({ contactId }).where(eq(schema.prospects.id, prospectId));
     await db!.delete(schema.contacts).where(eq(schema.contacts.id, saved.id));
+  });
+
+  // The consent model is the whole point of the messenger layer, and it is a property
+  // of the database rather than of the platforms: an inbound event creates permission,
+  // the absence of one refuses a send, and a STOP removes it. Nothing here reaches the
+  // network — the fetch is injected, and CI holds no bot token at all.
+  it("grants messenger permission only to someone who writes to us first", async () => {
+    const chatId = `7${Buffer.from(run).toString("hex").slice(0, 9)}`;
+    const event = (over: Partial<ChannelInbound> = {}): ChannelInbound => ({
+      channel: "telegram",
+      externalId: chatId,
+      handle: "@smoke_peer",
+      text: "hello",
+      startParam: null,
+      revoking: false,
+      at: new Date(),
+      dedupeKey: `int:${run}:${nanoid(6)}`,
+      ...over,
+    });
+
+    // Nothing is sendable before an inbound event, whatever we happen to know about
+    // this person's phone number or username.
+    expect(await listProspectIdentities(workspaceId, prospectId)).toEqual([]);
+    await expect(sendChannelMessage({ workspaceId, prospectId, channel: "telegram", text: "cold open" })).rejects.toThrow(
+      /never written to us/i,
+    );
+
+    // An event we cannot attribute must not create a permission either: a row with no
+    // owner would be a licence to message a stranger discovered later.
+    const orphan = await recordChannelInbound(event({ startParam: "reference_we_never_issued" }));
+    expect(orphan).toMatchObject({ handled: true, attributed: false });
+    expect(await listProspectIdentities(workspaceId, prospectId)).toEqual([]);
+
+    // The tracked chat link in the email they clicked is what ties them to the prospect.
+    const start = await recordChannelInbound(event({ startParam: firstReferenceId, text: "/start" }));
+    expect(start).toMatchObject({ handled: true, attributed: true, prospectId });
+
+    const [identity] = await listProspectIdentities(workspaceId, prospectId);
+    expect(identity).toBeTruthy();
+    expect(identity!.consentSource).toBe("telegram.start");
+    expect(identity!.externalId).toBe(chatId);
+    expect(permissionToSend(identity!, { channel: "telegram", now: new Date() }).allowed).toBe(true);
+
+    const calls: { url: string; body: Record<string, unknown> }[] = [];
+    const stubFetch = (async (url: unknown, init?: RequestInit) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+      return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 4242 } }) };
+    }) as unknown as typeof fetch;
+
+    const sent = await sendChannelMessage({
+      workspaceId,
+      prospectId,
+      channel: "telegram",
+      text: "Good to meet you here — what does your migration timeline look like?",
+      fetchImpl: stubFetch,
+    });
+    if (env.telegramBotToken) {
+      // A developer running this with a real bot configured must still not reach the
+      // platform: the injected fetch is the only transport, and it records the call.
+      expect(sent).toMatchObject({ delivered: true, simulated: false });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.body.chat_id).toBe(chatId);
+    } else {
+      // Unconfigured sender: recorded, and admitted as a simulation rather than a delivery.
+      expect(sent).toMatchObject({ delivered: false, simulated: true });
+      expect(calls).toHaveLength(0);
+    }
+
+    // The conversation shows both halves and names the medium of each, so a chat reply
+    // is never mistaken for an email the autopilot may answer however it likes.
+    const thread = await getProspectThread(workspaceId, prospectId, 50);
+    const chat = thread.filter((m) => m.channel === "telegram");
+    expect(chat.map((m) => m.direction)).toContain("inbound");
+    expect(chat.map((m) => m.direction)).toContain("outbound");
+    const outboundChat = chat.find((m) => m.direction === "outbound")!;
+    // A simulated send must still read as simulated in the history it wrote.
+    if (sent.simulated) expect(outboundChat.status).toMatch(/^sent: simulated/);
+    else expect(outboundChat.status).toBe("sent");
+
+    // They ask to stop. The event both revokes and records it.
+    const stop = await recordChannelInbound(event({ text: "STOP", revoking: true }));
+    expect(stop).toMatchObject({ attributed: true, revoked: true });
+    const afterStop = await listProspectIdentities(workspaceId, prospectId);
+    expect(afterStop[0]!.revokedAt).toBeTruthy();
+    const refusal = permissionToSend(afterStop[0]!, { channel: "telegram", now: new Date() });
+    expect(refusal.allowed).toBe(false);
+    await expect(sendChannelMessage({ workspaceId, prospectId, channel: "telegram", text: "one more?" })).rejects.toThrow(
+      /asked to stop/i,
+    );
+
+    // Writing again is theirs to do, and it is what reopens the conversation.
+    await recordChannelInbound(event({ text: "actually, still interested" }));
+    const revived = await listProspectIdentities(workspaceId, prospectId);
+    expect(revived[0]!.revokedAt).toBeNull();
+
+    // The platform that cannot be attributed by a link of ours refuses cross-tenant
+    // guesses: this number belongs to no prospect here, so nothing is stored.
+    const waStranger = await recordChannelInbound(
+      event({ channel: "whatsapp", externalId: `1555${Buffer.from(run).toString("hex").slice(0, 7)}` }),
+    );
+    expect(waStranger).toMatchObject({ handled: true, attributed: false });
+
+    // Clean up: the channel rows hang off this prospect, and later tests count events.
+    await db!.delete(schema.channelIdentities).where(eq(schema.channelIdentities.prospectId, prospectId));
+    await db!
+      .delete(schema.emailEvents)
+      .where(and(eq(schema.emailEvents.workspaceId, workspaceId), eq(schema.emailEvents.fromAddress, `telegram:${chatId}`)));
+    await db!
+      .delete(schema.outreachMessages)
+      .where(and(eq(schema.outreachMessages.prospectId, prospectId), eq(schema.outreachMessages.channel, "telegram")));
   });
 
   // Monitoring has to be proved against the real table: the aggregates behind it

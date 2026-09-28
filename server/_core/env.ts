@@ -93,6 +93,34 @@ export const env = {
   senderPostalAddress: str("SENDER_POSTAL_ADDRESS"),
   replyIngestSecret: str("REPLY_INGEST_SECRET"),
 
+  // Non-email channels. Neither of these is a cold-outreach channel: Telegram only
+  // lets a bot write to a person who has opened the chat, and the WhatsApp Cloud
+  // API only lets it write inside a 24-hour window that the *user* opened by
+  // messaging the business. So the product sends email, offers a link, and the
+  // inbound event on that other platform is what creates the permission (see
+  // services/channels.ts). Every value here is empty by default, which means the
+  // channels exist as data but nothing can be sent on them.
+  telegramBotToken: str("TELEGRAM_BOT_TOKEN"),
+  // Public username, used to build the t.me/<bot>?start=<ref> deep link that turns
+  // an email reader into someone who chose to be written to on Telegram.
+  telegramBotUsername: str("TELEGRAM_BOT_USERNAME"),
+  // Telegram cannot sign its webhook payloads, so this is sent as the
+  // X-Telegram-Bot-Api-Secret-Token header and compared here. Unset => the
+  // endpoint accepts nothing, because anyone who learns the bot's webhook URL
+  // would otherwise be able to fabricate consent on someone's behalf.
+  telegramWebhookSecret: str("TELEGRAM_WEBHOOK_SECRET"),
+  whatsappAccessToken: str("WHATSAPP_ACCESS_TOKEN"),
+  whatsappPhoneNumberId: str("WHATSAPP_PHONE_NUMBER_ID"),
+  // Meta signs each webhook body with this app secret (HMAC-SHA256 over the raw
+  // body), so inbound is authentic rather than merely well-formed.
+  whatsappAppSecret: str("WHATSAPP_APP_SECRET"),
+  // Only used for the subscription handshake (hub.verify_token echo).
+  whatsappVerifyToken: str("WHATSAPP_VERIFY_TOKEN"),
+  // How long after the person's last message a reply is still allowed. The
+  // platform window is 24 h; the setting exists to shorten it, never to lengthen
+  // it past what the provider permits.
+  messengerWindowHours: num("MESSENGER_WINDOW_HOURS", 24),
+
   // Billing
   plategaMerchantId: str("PLATEGA_MERCHANT_ID"),
   plategaSecret: str("PLATEGA_SECRET"),
@@ -166,6 +194,24 @@ export function assertRuntimeConfig(): void {
     if (!env.replyIngestSecret) {
       warnings.push(
         "REPLY_INGEST_SECRET is unset, so inbound webhook requests cannot be authenticated. The endpoints refuse everything (fail closed), which means replies arrive nowhere and the funnel silently stops at 'sent'.",
+      );
+    }
+    // Half-configured channels: on these platforms the inbound leg is what creates the
+    // permission to send, so a sender without it is not a channel with no takers yet —
+    // it is a channel that can never have one, and only the operator can tell.
+    if (env.telegramBotToken && !env.telegramWebhookSecret) {
+      warnings.push(
+        "TELEGRAM_BOT_TOKEN is set but TELEGRAM_WEBHOOK_SECRET is not, so /api/channels/telegram refuses every update. Nobody can grant permission to be written to on Telegram, and the channel will stay empty however many links are sent.",
+      );
+    }
+    if (env.telegramBotToken && !env.telegramBotUsername) {
+      warnings.push(
+        "TELEGRAM_BOT_USERNAME is unset, so no outgoing email can carry a t.me link. The bot will still answer anyone who finds it, but nothing in this system will ever direct a prospect there.",
+      );
+    }
+    if (env.whatsappAccessToken && !env.whatsappAppSecret) {
+      warnings.push(
+        "WHATSAPP_ACCESS_TOKEN is set but WHATSAPP_APP_SECRET is not, so inbound WhatsApp messages cannot be signature-verified and are rejected. No reply window can open, so nothing can be sent back.",
       );
     }
   }

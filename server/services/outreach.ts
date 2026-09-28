@@ -107,6 +107,10 @@ export async function sendOutreachEmail(
     links: ctaLinksFromConfig({
       calendlyUrl: env.calendlyUrl,
       stripePaymentLink: env.stripePaymentLink,
+      // Tracked only when it appears in the text: the bot link is never injected into
+      // a draft automatically, because moving a cold conversation onto a channel where
+      // we may then write to them again is the operator's call, not the writer's.
+      telegramBotUsername: env.telegramBotUsername,
     }),
   });
 

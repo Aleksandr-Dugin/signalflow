@@ -105,6 +105,7 @@ export function canAdvanceStage(from: OpportunityStage, to: OpportunityStage): b
 export type ConversionSignal =
   | "cta_clicked:booking"
   | "cta_clicked:payment"
+  | "cta_clicked:telegram"
   | "meeting_confirmed"
   | "payment_captured";
 
@@ -113,6 +114,9 @@ const SIGNAL_TARGET: Record<ConversionSignal, OpportunityStage | null> = {
   "cta_clicked:booking": null,
   // Engaging the checkout link is a commercial conversation. Real click, real intent.
   "cta_clicked:payment": "negotiating",
+  // Opening a chat link is neither a meeting nor a purchase. It is how consent for the
+  // Telegram channel begins (services/channels.ts), which is a capability, not progress.
+  "cta_clicked:telegram": null,
   // Calendly told us an event exists.
   meeting_confirmed: "meeting_booked",
   // Money moved.

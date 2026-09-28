@@ -150,7 +150,7 @@ transcribable API, and writing an adapter for it would be a guess dressed as a f
 | Before anything is stored, a record is refused if it is a personal mailbox, a role mailbox (`info@`, `support…`), a `low`/`none` match, or labelled `risky`/`invalid`/`catch_all`/`role` | We are paying for a named human at the company's own domain. Anything else is a stranger with a bought address — and a bad mailbox damages the sending domain, not merely this one message. |
 | An obfuscated name (`Hu***n`) is never used as a name | Apollo's search results hide surnames until the paid enrichment; greeting "Dear Hu***n" is worse than greeting nobody. |
 | `reveal_personal_emails` and `reveal_phone_number` are never requested | The first is exactly what the rule above refuses; the second costs 8 credits and arrives on a webhook this app does not have. Numbers are taken only when the synchronous response already carries them. |
-| Phones and profile URLs are stored but never sent | `outreach_messages.channel` is an enum with the single value `email`. A phone number is a coordinate for a human to act on, and the UI labels it "recorded only". |
+| Phones and profile URLs are stored, and a number becomes reachable only through a `channel_identities` row the person created | `outreach_messages.channel` is `email` \| `telegram` \| `whatsapp`, but a messenger row can only exist where that person wrote to us first (see below). A phone number on its own is a coordinate for a human to act on, and the UI labels it as such. |
 | `contacts.origin` ∈ `manual` \| `page` \| `provider`; a re-run fills empty fields and overwrites nothing | Provenance decides what you may lawfully do with a record and how much to trust it. An operator typing an address outranks a scrape; a scrape outranks a bought guess. |
 | The request URL is scrubbed of `api_key` before it is stored as `sourceUrl` | Hunter authenticates in the query string and `sourceUrl` is a column the browser renders. Without this, every contact row is a credential leak. |
 | A provider that is down degrades to "no data" plus a warning; a provider that is *not configured* throws | "They are not in the database" is a fact about the prospect; "you have not set ENRICHMENT_PROVIDER" is a fact about the deployment. Only the second should look like an error. |
@@ -161,6 +161,47 @@ Apollo mapping is transcribed from Apollo's published OpenAPI, the Hunter mappin
 the examples in their docs — whose site could not be reached from the network this was
 written on. Every Hunter field is therefore read through an alias list, and the first
 live call must be diffed against a logged raw body (`docs/verification.md`, §8).
+
+## Answering on the prospect's terms: Telegram and WhatsApp
+
+[server/services/channels.ts](../server/services/channels.ts) adds two channels, and it
+is worth being precise about what kind of feature that is, because the naive version
+would be both illegal on those platforms and unlawful under GDPR.
+
+**Neither platform permits cold outreach.** Telegram bots may not message people who
+have not started the chat, and WhatsApp Business only allows free-form text inside a 24
+hour window that the *recipient* opens. So these channels do not buy reach — a phone
+number in `contacts` cannot be messaged, however much the lookup cost. What they buy is
+the ability to keep a conversation where the other person wants to have it.
+
+The flow is therefore email-first, and every rule below follows from that:
+
+```
+email (with a tracked t.me/<bot>?start=<ref> link)
+  -> they click -> /api/track/cta/<ref>/telegram   (evidence only, no stage change)
+  -> Telegram delivers /start <ref> to /api/channels/telegram
+  -> <ref> is looked up in outreach_messages -> prospect
+  -> a channel_identities row is created          <- permission is born here, and only here
+  -> a human may now write there (manual, per message)
+```
+
+| Rule | Why |
+| --- | --- |
+| Permission is created only by an **inbound**, verified platform event | No code path in this repository can grant it. `permissionToSend()` returns "this person has never written to us" for a prospect with no row, and the sender refuses before any API call. |
+| `channel_identities` stores `consentSource`, `consentAt`, `revokedAt`, `lastInboundAt` | Consent needs a date and a reason, not a checkbox. The prospect page prints both next to the channel. |
+| A revocation is permanent until **they** write again | `STOP`, `unsubscribe`, `opt out`, `отписаться` (leading word, punctuation tolerated) sets `revokedAt`. An inbound message after that clears it, because the person re-initiated. |
+| A provider reply that says the chat is gone (`bot was blocked`, `Chat not found`, `recipient not in session`) is read as a revocation | Blocked us = asked us to stop. Recording it as `sent` would be a lie about the relationship. |
+| WhatsApp sends are checked against the 24 h window at send time, and `MESSENGER_WINDOW_HOURS` is clamped to 24 in code | The setting can be conservative; it cannot buy a longer window than Meta allows. Templates are never sent, so there is no business-initiated leg at all. |
+| Sends are manual, rate-limited to 10/min per workspace, capped at 4000 characters | An autopilot on these platforms multiplies the reach of a sender whose reputation is one complaint from suspension. Approval stays with a person. |
+| Inbound events we cannot attribute to a prospect store **nothing** | A consent row without an owner would be a licence to message a stranger found later. |
+| WhatsApp attribution is by phone number, and a number matching more than one workspace binds nothing | The platform hands us no reference of ours. Cross-tenant search is allowed only to disambiguate, never to guess. |
+| The webhook endpoints refuse everything until their verification secret is configured | Telegram cannot sign payloads, so the `secret_token` we registered is echoed back as `X-Telegram-Bot-Api-Secret-Token`; WhatsApp bodies carry `X-Hub-Signature-256`, an HMAC over the raw body. Both are compared with `timingSafeEqual`, and both are checked before the payload is interpreted. |
+| A `telegram` CTA click records evidence and advances **no** stage | `cta_clicked:telegram` maps to `null` in the stage table. Opening a chat is not a buying signal; treating it as one would inflate the funnel with courtesy clicks. |
+| Inbound channel messages land in `email_events` under a `telegram:<id>` address | The classifier, the thread and the GDPR export keep working without learning a new table per platform; `getProspectThread()` reads the medium back out of that address and labels it. |
+
+A stored phone number is therefore not a capability. It is the key that lets an inbound
+WhatsApp message find its prospect — nothing more.
+
 
 ## Watching the loop: worker and queue monitoring
 
@@ -297,11 +338,12 @@ mailing actual prospects; that is not optional.
 
 ## Deliberate constraints
 
-- Email is the **only outbound channel**. There is no phone/SMS, Telegram or WhatsApp
-  sender, and `contactExtraction` does not mine social profiles — scraping LinkedIn
-  and friends breaks their ToS, and an agent that gets its key revoked is worse than
-  one that has fewer channels. Numbers and social handles can be stored and used only
-  via a compliant enrichment provider.
+- Email is the **default outbound channel**, and the only one the automation may use on
+  its own. Telegram and WhatsApp exist as reply paths only — see "Answering on the
+  prospect's terms" above. `contactExtraction` does not mine social profiles: scraping
+  LinkedIn and friends breaks their ToS, and an agent that gets its key revoked is worse
+  than one that has fewer channels. Handles and numbers can be stored, and used only via
+  a compliant enrichment provider or a consent row the person created.
 - Outbound is text/plain (plus optional HTML) with a `List-Unsubscribe` header and the
   RFC 8058 one-click POST — see `server/services/email.ts`. This is a deliverability
   requirement for Gmail/Yahoo cold mail, not a nicety. The body footer adds the postal

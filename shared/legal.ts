@@ -82,6 +82,16 @@ export const SUBPROCESSORS: { name: string; purpose: string; onlyIf: string }[] 
     onlyIf: "STRIPE_PAYMENT_LINK is set",
   },
   {
+    name: "Telegram",
+    purpose: "receiving a message from you when you choose to write to the operator's bot, and answering it there",
+    onlyIf: "TELEGRAM_BOT_TOKEN is set, and only after you start the chat",
+  },
+  {
+    name: "WhatsApp (Meta)",
+    purpose: "the same, on the business number the operator configures",
+    onlyIf: "WHATSAPP_* is set, and only inside the reply window you opened by messaging first",
+  },
+  {
     name: "Platega",
     purpose: "billing for this software itself, not for prospect data",
     onlyIf: "BILLING_PROVIDER=platega",
@@ -109,6 +119,7 @@ export const PRIVACY: LegalDocument = {
         "Every message sent to you: subject, body, the time it was sent and its delivery status.",
         "Everything you send back. The original body of an inbound reply is kept verbatim, as sent, because a later dispute about what was said cannot be settled from a summary. Machine classification of your reply (interested, not interested, unsubscribe) is stored alongside it.",
         "Interaction events: delivery, bounce, a click on a link we generated, a meeting booked through a link we gave you, a payment made through a link we gave you.",
+        "A messenger conversation, if you started one. Where the operator has configured a chat channel and you write to it, we store your identifier on that platform (a Telegram user id, or a WhatsApp number), the profile name the platform supplies, the fact and the date that you initiated it, and the text of the messages either side sent there. That record is what the software treats as your permission to be written to on that channel; without it there is no consent row, and without a consent row it will refuse to send. Saying 'stop' there is recorded and honoured.",
         "Derived assessments: a fit score, an intent score, the reasons a prospect was qualified or disqualified, and any opportunity record built from the above. These are the software's own guesses about a business, and the operator can override them at any time.",
         "What is never recorded: your password is stored as a hash and is not readable by the operator; we place no advertising or analytics cookies, and the tracking links we generate are first-party and resolve to this server only.",
       ],
@@ -128,6 +139,7 @@ export const PRIVACY: LegalDocument = {
         "That basis has to survive a balancing test, which is why the software restricts itself. An address reaches a record only from a page this system actually read, from a vendor licence the operator paid for, or from a human who typed it in; this software never constructs an address from a name and a domain pattern. A purchased record is dropped when the vendor labels it risky, invalid or uncertain, and a purchased personal-mailbox or shared role mailbox is dropped outright. On the free route a named person at the company's own domain always outranks a shared mailbox, which is used only where the company published nothing else — and no message goes out at all if the address is on the suppression list.",
         "A legitimate-interests assessment cannot be done in code, only decided, so the operator's own written assessment is what authorises sending. This policy states the basis the product is built around; it does not establish that the basis applies to your campaign.",
         "Separate rules govern the act of sending itself — ePrivacy in the EU, CAN-SPAM in the US, and their equivalents elsewhere. Those sit with the operator and are conditions of the terms of service, not covered by this policy.",
+        "Chat channels rest on a different basis from email. Writing to you on Telegram or WhatsApp happens only after you wrote to the operator there first, so the basis for that conversation is consent — given by you, by starting it — and it is revocable by you in the same place, by saying stop. Consent to chat is not consent to email, and neither reaches the other.",
       ],
     },
     {

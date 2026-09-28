@@ -9,7 +9,7 @@
 // research summaries) is not the data subject's personal data and is not touched —
 // deleting it would destroy someone else's record to satisfy this one request, and
 // "we also removed the company" would be a false claim about what erasure did.
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, inArray, notInArray, or } from "drizzle-orm";
 import * as schema from "../../drizzle/schema";
 import { getDb } from "../_core/database";
 
@@ -81,6 +81,30 @@ export interface SubjectDossier {
     createdAt: string | null;
   }[];
   suppressions: { id: string; reason: string; createdAt: string | null }[];
+  /**
+   * Non-email channel permissions held about this person. Disclosed because a chat id
+   * we may write to is personal data like any other, and erased because a record that
+   * authorises future contact must not outlive the request that ended the relationship.
+   */
+  channels: {
+    id: string;
+    channel: string;
+    externalId: string;
+    handle: string | null;
+    consentSource: string;
+    consentAt: string | null;
+    revokedAt: string | null;
+    lastInboundAt: string | null;
+  }[];
+  /** Messages we sent on those channels, addressed by platform id rather than email. */
+  channelMessages: {
+    id: string;
+    channel: string;
+    recipient: string;
+    body: string;
+    status: string;
+    sentAt: string | null;
+  }[];
   /** Queued or in-flight jobs that would still act on this person. */
   pendingJobs: { id: string; type: string; status: string; payload: unknown }[];
   /**
@@ -134,7 +158,7 @@ async function collect(db: NonNullable<ReturnType<typeof getDb>>, workspaceId: s
     : [];
   const prospectIds = prospects.map((p) => p.id);
 
-  const [outreach, events, personalizations, opportunities, suppressionRows, jobs] = await Promise.all([
+  const [outreach, events, personalizations, opportunities, suppressionRows, jobs, channels, channelOutreach] = await Promise.all([
     db.select().from(schema.outreachMessages).where(
       and(eq(schema.outreachMessages.workspaceId, workspaceId), eq(schema.outreachMessages.recipientEmail, email)),
     ),
@@ -165,11 +189,42 @@ async function collect(db: NonNullable<ReturnType<typeof getDb>>, workspaceId: s
           inArray(schema.jobRuns.status, ["queued", "running"]),
         ),
       ),
+    // A Telegram or WhatsApp conversation is addressed to a platform id, so the email
+    // predicate above never sees it. It is reached through the prospect instead, which
+    // is exactly how it was created — and an erasure that quietly skipped those rows
+    // would leave both the messages and the permission to write again.
+    prospectIds.length
+      ? db.select().from(schema.channelIdentities).where(inArray(schema.channelIdentities.prospectId, prospectIds))
+      : Promise.resolve([]),
+    prospectIds.length
+      ? db
+          .select()
+          .from(schema.outreachMessages)
+          .where(
+            and(
+              eq(schema.outreachMessages.workspaceId, workspaceId),
+              inArray(schema.outreachMessages.prospectId, prospectIds),
+              notInArray(schema.outreachMessages.channel, ["email"]),
+            ),
+          )
+      : Promise.resolve([]),
   ]);
 
   const jobIds = new Set(jobRunsMentioning(jobs, { prospectIds, email }));
 
-  return { contacts, prospects, outreach, events, personalizations, opportunities, suppressionRows, jobs, jobIds };
+  return {
+    contacts,
+    prospects,
+    outreach,
+    events,
+    personalizations,
+    opportunities,
+    suppressionRows,
+    jobs,
+    jobIds,
+    channels,
+    channelOutreach,
+  };
 }
 
 /**
@@ -211,6 +266,7 @@ export async function exportSubjectData(
     !found.contacts.length &&
     !found.outreach.length &&
     !found.events.length &&
+    !found.channels.length &&
     !found.suppressionRows.length
   ) {
     return null;
@@ -284,6 +340,24 @@ export async function exportSubjectData(
       notes: o.notes ?? null,
       createdAt: iso(o.createdAt),
     })),
+    channels: found.channels.map((c) => ({
+      id: c.id,
+      channel: c.channel,
+      externalId: c.externalId,
+      handle: c.handle ?? null,
+      consentSource: c.consentSource,
+      consentAt: iso(c.consentAt),
+      revokedAt: iso(c.revokedAt),
+      lastInboundAt: iso(c.lastInboundAt),
+    })),
+    channelMessages: found.channelOutreach.map((m) => ({
+      id: m.id,
+      channel: m.channel,
+      recipient: m.recipientEmail,
+      body: m.body,
+      status: m.status,
+      sentAt: iso(m.sentAt),
+    })),
     suppressions: found.suppressionRows.map((s) => ({
       id: s.id,
       reason: s.reason,
@@ -302,6 +376,12 @@ export async function exportSubjectData(
       found.events.some((e) => e.direction === "inbound")
         ? "The original text of your inbound replies is stored verbatim, as sent, for audit."
         : "No inbound reply text is stored.",
+      found.channels.length
+        ? `We also hold a chat identity on ${[...new Set(found.channels.map((c) => c.channel))].join(" and ")}, which you started yourself on ${found.channels
+            .map((c) => iso(c.consentAt))
+            .filter(Boolean)
+            .join(", ")}. That record is what allows messages on that channel, and it is deleted with the rest of this answer.`
+        : "No non-email channel identity is held about you.",
       "Company-level research (industry, size, public signals) is held about the organisation, not about you, and is outside this answer.",
     ],
   };
@@ -316,6 +396,8 @@ export interface ErasureResult {
     personalizations: number;
     opportunities: number;
     jobs: number;
+    channels: number;
+    channelMessages: number;
   };
   /** Rows deliberately left in place, with the reason shown to the operator. */
   retained: { what: string; why: string }[];
@@ -342,6 +424,8 @@ export async function eraseSubjectData(workspaceId: string, rawEmail: string): P
   const personalizationIds = found.personalizations.map((d) => d.id);
   const opportunityIds = found.opportunities.map((o) => o.id);
   const jobIds = [...found.jobIds];
+  const channelIds = found.channels.map((c) => c.id);
+  const channelMessageIds = found.channelOutreach.map((m) => m.id);
 
   // Events first: they reference both outreach rows and prospect rows.
   if (eventIds.length) {
@@ -349,6 +433,15 @@ export async function eraseSubjectData(workspaceId: string, rawEmail: string): P
   }
   if (jobIds.length) {
     await db.delete(schema.jobRuns).where(inArray(schema.jobRuns.id, jobIds));
+  }
+  // The permission to write on Telegram/WhatsApp goes before the messages it
+  // authorised and before the prospect it belongs to. Nothing here is left behind: a
+  // surviving identity row would be a licence to contact this person again.
+  if (channelMessageIds.length) {
+    await db.delete(schema.outreachMessages).where(inArray(schema.outreachMessages.id, channelMessageIds));
+  }
+  if (channelIds.length) {
+    await db.delete(schema.channelIdentities).where(inArray(schema.channelIdentities.id, channelIds));
   }
   if (outreachIds.length) {
     await db.delete(schema.outreachMessages).where(inArray(schema.outreachMessages.id, outreachIds));
@@ -395,6 +488,8 @@ export async function eraseSubjectData(workspaceId: string, rawEmail: string): P
       personalizations: personalizationIds.length,
       opportunities: opportunityIds.length,
       jobs: jobIds.length,
+      channels: channelIds.length,
+      channelMessages: channelMessageIds.length,
     },
     retained,
   };
