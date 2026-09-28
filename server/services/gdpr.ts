@@ -15,6 +15,11 @@ import { getDb } from "../_core/database";
 
 /** Everything a request about one address can lawfully ask to see. */
 export interface SubjectDossier {
+  /**
+   * The address as the request normalised it (trimmed, lower-cased), which is the form
+   * every row here and the suppression entry are keyed on. Echoing the caller's casing
+   * back would put a document title on an address the database does not hold.
+   */
   email: string;
   generatedAt: string;
   contacts: {

@@ -50,18 +50,45 @@ What CI already covers (`.github/workflows/ci.yml`):
   is acknowledged rather than stored), and in a second boot with no channel credentials at
   all, where every inbound route answers `503`.
 
-> **Status: green as of CI run #16. Runs #12-#15 were red, and this page said "green"
-> through all of them.** The failure mode was not a flaky test; it was a claim nobody
-> checked. This machine cannot run Docker at all (`wsl -l` reports Windows Subsystem for
-> Linux is not installed, so the Linux engine answers `request returned 500`), which means
-> `REQUIRE_INTEGRATION_TESTS` flag set in the integration job is what makes that
-> statement meaningful — without it the suite could have reported success from a
-> file of silent skips, which is exactly how run #1 nearly fooled us. Two real bugs
-> were found by this suite on its first execution: the `CI`-scoped skip guard
-> breaking the `checks` job, and `applyStripeValue` writing `valueCents = 0` for every
-> Stripe Payment Link sale. Run `pnpm smoke` also passes locally and on the
-> runner. What remains genuinely unverified is everything below, which no
-> container can cover.
+> **Status: runs #12-#15 were red, and this page said "green" through all of them.**
+> The failure mode was not a flaky test; it was a claim nobody checked. This machine
+> cannot run Docker at all (`wsl -l` reports that Windows Subsystem for Linux is not
+> installed, so the Linux engine answers `request returned 500`), which means
+> `server/integration.test.ts` has been skipping itself on every local run since then
+> while still printing a reassuring "214 passed". Four things were wrong in that file,
+> and the runner found them one at a time, each hidden behind the last:
+>
+> 1. The subject-access test inserted its second prospect on the *shared* fixture
+>    company, which `prospects_campaign_company_unique` forbids - a campaign holds
+>    exactly one prospect per company. The test now gives that data subject their own
+>    company. The constraint is right and is what the product needs; the fixture was
+>    quietly pretending otherwise.
+> 2. The messenger test proved a real defect rather than a bad assertion: attribution
+>    accepted only our own `start` reference (or a WhatsApp phone match), but a
+>    follow-up message in an existing chat carries neither. So **"STOP" could never be
+>    tied to the person who sent it** - revocation was unreachable in production. An
+>    existing `channel_identities` row is now also an attribution path, with ambiguous
+>    matches still refused. See `knownIdentities()`.
+> 3. The subject-access test compared the dossier's address against the mixed-case string
+>    it had passed in. The dossier answers in the normalised form every row is keyed on,
+>    so the assertion was written by someone who had never watched that line execute.
+> 4. The master-switch case assumed it owned the entire queue (`toEqual([jobId])`). That
+>    only appeared to hold because failure 1 aborted the erasure test before it could
+>    leave a queued job behind. It now compares against a snapshot of what was already
+>    queued when the lever was pulled - which is the claim it meant to make anyway.
+>
+> `REQUIRE_INTEGRATION_TESTS` on the runner is what makes "the suite ran" mean "the
+> suite executed": without it a file of silent skips reports success, which is how
+> run #1 nearly fooled us - and runs #12-#15 fooled us one level higher up, at the
+> summary line. The rule this leaves behind: after any push that touches
+> `integration.test.ts`, open the run on GitHub and read it before writing a word about
+> it being green. Run #17 carries all four fixes; confirm it before repeating any claim
+> on this page. `pnpm smoke` passes locally and on the runner either way - it needs no
+> database, so it proves the HTTP edge and nothing about the schema. Note the shape of
+> this failure: fixing two red tests revealed two more that had never been reached, so
+> "I fixed the two bugs" is not the same statement as "CI is green", and only the second
+> one is worth writing down. What remains genuinely unverified is everything below, which
+> no container can cover.
 
 ## Must verify live
 

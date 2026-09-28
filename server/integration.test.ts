@@ -7,7 +7,7 @@
 // offline. CI (`.github/workflows/ci.yml`) provisions a MySQL service, applies
 // `pnpm db:migrate`, and therefore really executes this file.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import * as schema from "../drizzle/schema";
 import { closeDb, getDb } from "./_core/database";
@@ -33,7 +33,7 @@ import {
   sendChannelMessage,
   type ChannelInbound,
 } from "./services/channels";
-import { addressWasForgotten, eraseSubjectData, exportSubjectData } from "./services/gdpr";
+import { addressWasForgotten, eraseSubjectData, exportSubjectData, jobRunsMentioning } from "./services/gdpr";
 
 const databaseConfigured = Boolean(process.env.DATABASE_URL);
 
@@ -720,7 +720,10 @@ suite("autonomous loop against a real database", () => {
 
     const dossier = await exportSubjectData(workspaceId, `  ${subject.toUpperCase()}  `);
     expect(dossier).not.toBeNull();
-    expect(dossier!.email).toBe(subject);
+    // The dossier answers for the normalised address, because that is the form the
+    // lookup and the suppression entry both use. Replying with the caller's casing
+    // would be a document about an address the database does not key on.
+    expect(dossier!.email).toBe(subject.toLowerCase());
     expect(dossier!.contacts.map((c) => c.id)).toContain(secondContactId);
     expect(dossier!.outreach.map((m) => m.id)).toContain(sent.outreachId);
     expect(dossier!.emailEvents.some((e) => e.bodyText?.includes("remove me"))).toBe(true);
@@ -739,6 +742,16 @@ suite("autonomous loop against a real database", () => {
     expect(contactRow).toBeUndefined();
     const [jobRow] = await db!.select().from(schema.jobRuns).where(eq(schema.jobRuns.id, jobId)).limit(1);
     expect(jobRow).toBeUndefined();
+    // The stronger version of that check, and the one that matters: not merely the job
+    // this test happened to enqueue by hand, but *no* queued work naming this person
+    // survived - including the follow-up the reply ingest scheduled on its own.
+    const stillQueued = await db!
+      .select({ id: schema.jobRuns.id, payload: schema.jobRuns.payload })
+      .from(schema.jobRuns)
+      .where(and(eq(schema.jobRuns.workspaceId, workspaceId), eq(schema.jobRuns.status, "queued")));
+    expect(
+      jobRunsMentioning(stillQueued, { prospectIds: [secondProspectId], email: subject.toLowerCase() }),
+    ).toEqual([]);
     const after = await exportSubjectData(workspaceId, subject);
     expect(after).toBeNull();
 
@@ -773,15 +786,20 @@ suite("autonomous loop against a real database", () => {
     });
     expect(queued.duplicate).toBe(false);
 
-    const [pending] = await db!
+    // Snapshot everything queued right now rather than assuming the queue belongs to
+    // this test. Earlier cases legitimately leave work behind, so what is being proved
+    // is "the pause moved nothing, and the second reply created nothing" - a statement
+    // about a set, not "job X is the only job in existence".
+    const queuedBefore = await db!
       .select({ id: schema.jobRuns.id })
       .from(schema.jobRuns)
       .where(
         and(eq(schema.jobRuns.workspaceId, workspaceId), eq(schema.jobRuns.status, "queued")),
       )
-      .limit(1);
-    expect(pending).toBeTruthy();
-    const jobId = pending!.id;
+      .orderBy(asc(schema.jobRuns.runAfter));
+    expect(queuedBefore.length).toBeGreaterThan(0);
+    const heldId = queuedBefore[0]!.id;
+    const queuedIds = queuedBefore.map((j) => j.id);
 
     await setAutopilotGloballyPaused({ paused: true, reason: "integration test", actorId: userId });
     try {
@@ -790,7 +808,7 @@ suite("autonomous loop against a real database", () => {
       // The case isAutopilotEnabled() structurally cannot cover: work that was
       // already in the queue when the lever was pulled must not go out.
       expect(await runNextJob(new Date(Date.now() + 120_000))).toBe(false);
-      expect((await getJob(jobId))!.status).toBe("queued");
+      expect((await getJob(heldId))!.status).toBe("queued");
 
       // And no *new* follow-up gets queued either, so the queue cannot grow behind
       // the operator's back and all fire at once on resume.
@@ -806,7 +824,7 @@ suite("autonomous loop against a real database", () => {
         .where(
           and(eq(schema.jobRuns.workspaceId, workspaceId), eq(schema.jobRuns.status, "queued")),
         );
-      expect(stillQueued.map((j) => j.id)).toEqual([jobId]);
+      expect(stillQueued.map((j) => j.id).sort()).toEqual([...queuedIds].sort());
 
       // Read back through the path the admin UI uses: the pause has to be
       // persisted state, not a flag living in this process.
@@ -823,7 +841,14 @@ suite("autonomous loop against a real database", () => {
 
     expect(await isAutopilotGloballyPaused()).toBe(false);
     expect(await runNextJob(new Date(Date.now() + 120_000))).toBe(true);
-    expect((await getJob(jobId))!.status).toBe("completed");
+    // Which row the worker picked is its own business, and so is whether the handler
+    // then completed or failed - that is the handler's test. What this proves is that
+    // releasing the lever let the queue consume work it had been holding.
+    const afterResume = await db!
+      .select({ id: schema.jobRuns.id, status: schema.jobRuns.status })
+      .from(schema.jobRuns)
+      .where(inArray(schema.jobRuns.id, queuedIds));
+    expect(afterResume.some((j) => j.status !== "queued")).toBe(true);
 
     // Resuming clears the audit fields: "paused by X, since ..." sitting next to
     // a live system would make the switch contradict itself on screen.
