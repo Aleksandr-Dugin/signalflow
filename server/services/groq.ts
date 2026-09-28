@@ -97,16 +97,69 @@ export interface GroqCall<T> {
   maxTokens?: number;
 }
 
+/**
+ * Which OpenAI-compatible /chat/completions server the AI leg talks to. `label` is
+ * a human-facing name for logs/health only — it never decides behaviour, so a
+ * self-hosted model is not secretly treated differently from a hosted one.
+ */
+export interface ChatBackend {
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  label: string;
+}
+
+const GROQ_BASE_URL = "https://api.groq.com/openai/v1";
+
+/**
+ * Resolve the active AI backend by precedence, or null when none is configured (the
+ * caller then falls back to the honest labelled mock). A self-hosted server set via
+ * AI_BASE_URL wins over the Groq key, so pointing the product at a local model is a
+ * config change rather than a code change — and the Groq path keeps working today,
+ * before any local server exists.
+ */
+export function forBackend(): ChatBackend | null {
+  if (env.aiBaseUrl) {
+    return {
+      baseUrl: env.aiBaseUrl.replace(/\/$/, ""),
+      model: env.aiModel,
+      apiKey: env.aiApiKey,
+      label: "openai-compatible",
+    };
+  }
+  if (env.groqApiKey) {
+    return { baseUrl: GROQ_BASE_URL, model: env.groqModel, apiKey: env.groqApiKey, label: "groq" };
+  }
+  return null;
+}
+
 const MAX_RETRIES = 2;
 const TIMEOUT_MS = 25_000;
 
-export class GroqProvider {
-  readonly name = "groq";
+/**
+ * A minimal OpenAI-compatible chat client that returns schema-validated JSON. This
+ * one class serves every AI task (ICP, qualification, signals, research,
+ * personalization, classification) against whatever `ChatBackend` it is handed.
+ *
+ * The endpoint is deliberately not hardcoded: Groq, vLLM, llama.cpp and the PrismML
+ * Bonsai server all expose `/chat/completions` with `response_format: json_schema`,
+ * which is the only requirement this client makes of its backend. The auth header is
+ * sent only when a key exists, because a local model on loopback has none.
+ */
+export class ChatCompletionProvider {
+  readonly name = "live" as const;
+
+  constructor(private readonly backend: ChatBackend) {}
+
+  get model(): string {
+    return this.backend.model;
+  }
 
   async request<T>(call: GroqCall<T>): Promise<T> {
-    if (!env.groqApiKey) throw new Error("GROQ_API_KEY is not configured");
+    if (!this.backend.baseUrl) throw new Error("No AI backend configured (AI_BASE_URL / GROQ_API_KEY)");
+    if (!this.backend.model) throw new Error("AI backend requires a model name (AI_MODEL / GROQ_MODEL)");
     const body = {
-      model: env.groqModel,
+      model: this.backend.model,
       temperature: 0.1,
       max_completion_tokens: call.maxTokens ?? 1600,
       messages: [
@@ -115,18 +168,17 @@ export class GroqProvider {
       ],
       response_format: jsonSchemaResponseFormat(call.schemaName, call.schema),
     };
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.backend.apiKey) headers.Authorization = `Bearer ${this.backend.apiKey}`;
 
     let lastErr: unknown;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
       try {
-        const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        const res = await fetch(`${this.backend.baseUrl.replace(/\/$/, "")}/chat/completions`, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${env.groqApiKey}`,
-          },
+          headers,
           body: JSON.stringify(body),
           signal: controller.signal,
         });
@@ -135,9 +187,9 @@ export class GroqProvider {
           const status = res.status;
           const transient = status === 408 || status === 429 || status >= 500;
           if (!transient) {
-            throw new Error(`Groq request failed (${status}): ${text.slice(0, 200)}`);
+            throw new Error(`AI request failed (${status}): ${text.slice(0, 200)}`);
           }
-          throw new Error(`Groq transient error (${status})`);
+          throw new Error(`AI transient error (${status})`);
         }
         const json = (await res.json()) as any;
         const content = json?.choices?.[0]?.message?.content ?? "";
@@ -145,11 +197,11 @@ export class GroqProvider {
         try {
           parsed = JSON.parse(content);
         } catch {
-          throw new Error("Groq returned non-JSON content");
+          throw new Error("AI backend returned non-JSON content");
         }
         const result = call.parser.safeParse(parsed);
         if (!result.success) {
-          throw new Error(`Groq structured output validation failed: ${result.error.message}`);
+          throw new Error(`AI structured output validation failed: ${result.error.message}`);
         }
         return result.data;
       } catch (err) {
@@ -162,7 +214,7 @@ export class GroqProvider {
         clearTimeout(timer);
       }
     }
-    throw lastErr instanceof Error ? lastErr : new Error("Groq request failed");
+    throw lastErr instanceof Error ? lastErr : new Error("AI request failed");
   }
 
   generateICP(input: { service: string; target: string; geography: string }) {
@@ -389,3 +441,13 @@ function sleep(ms: number): Promise<void> {
 export function groqConfigured(): boolean {
   return Boolean(env.groqApiKey);
 }
+
+/** True when any live AI backend is reachable (a self-hosted server or Groq). */
+export function aiConfigured(): boolean {
+  return forBackend() !== null;
+}
+
+// Backward-compatible name: the class was Groq-specific before it learned to talk to
+// any OpenAI-compatible server. Kept so existing imports keep resolving by the old
+// name; new code uses ChatCompletionProvider.
+export { ChatCompletionProvider as GroqProvider };

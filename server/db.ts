@@ -41,6 +41,7 @@ import {
   type ResearchResult,
 } from "./services/providers";
 import { scoreProspect } from "./services/opportunity";
+import { forBackend } from "./services/groq";
 import { enrichCandidateWithContact, enrichCandidatesWithContacts } from "./services/contactExtraction";
 import { getEnrichmentProvider, lookupPeople, type EnrichedPerson } from "./services/enrichment";
 import { addressWasForgotten } from "./services/gdpr";
@@ -150,7 +151,7 @@ export async function generateIcpForWorkspace(
   const db = getDb();
   if (!db) throw new Error("Database unavailable.");
   const ai = getAIProvider();
-  const paid = ai.name === "groq";
+  const paid = ai.name !== "mock";
   await ensureAiBudget(workspaceId, paid);
   const criteria = await aiCached<IcpCriteria>({
     workspaceId,
@@ -443,7 +444,7 @@ export async function runDiscovery(workspaceId: string, campaignId: string): Pro
 
   const discovery = getDiscoveryProvider();
   const ai = getAIProvider();
-  const paid = ai.name === "groq";
+  const paid = ai.name !== "mock";
   const origin = discovery.name === "mock" ? "demo" : "live";
 
   const discovered = dedupeCandidates(
@@ -731,7 +732,7 @@ export async function getProspectDetail(workspaceId: string, prospectId: string)
           body: latestDraft.body,
           cta: latestDraft.cta,
           evidence: [],
-          provider: latestDraft.provider === "groq" ? "live" : "demo",
+          provider: latestDraft.provider === "groq" || latestDraft.provider === "live" ? "live" : "demo",
         }
       : null,
   };
@@ -892,7 +893,7 @@ export async function enrichProspectContact(
 
   let found: ContactInput | null = null;
   if (discovery.name !== "mock") {
-    const aiPaid = getAIProvider().name === "groq";
+    const aiPaid = getAIProvider().name !== "mock";
     await ensureAiBudget(workspaceId, aiPaid, 1);
     const enriched = await enrichCandidateWithContact((urls) => discovery.fetchPages(urls), {
       name: company.name,
@@ -969,7 +970,7 @@ export async function generatePersonalization(
   const [company] = await db.select().from(schema.companies).where(eq(schema.companies.id, (await prospectCompanyId(db, prospectId)))).limit(1);
 
   const ai = getAIProvider();
-  const paid = ai.name === "groq";
+  const paid = ai.name !== "mock";
   await ensureAiBudget(workspaceId, paid);
   const evidence = detail.evidence.map((e) => ({ claim: e.claim, sourceUrl: e.sourceUrl }));
   const objections = opts.lastReplyBody ? detectObjections(opts.lastReplyBody) : [];
@@ -1019,7 +1020,7 @@ export async function generatePersonalization(
     body: withTools.body,
     cta: withTools.cta,
     evidence,
-    provider: paid ? "groq" : "mock",
+    provider: paid ? "live" : "mock",
     cacheKey,
   });
   return { id, subject: withTools.subject, openingLine: withTools.openingLine, body: withTools.body, cta: withTools.cta, evidence: evidence.map((e) => e.claim), provider: paid ? "live" : "demo" };
@@ -1273,12 +1274,16 @@ export async function autopilotState(workspaceId: string): Promise<{
 // Everything here is cross-workspace and MUST only be reachable through an
 // adminProcedure. Normal users never call these.
 
-// Which integrations are wired up — booleans only, never the secret values.
+// Which integrations are wired up — booleans and names only, never the secret values.
 export function systemStatus() {
+  const aiName = getAIProvider().name;
   return {
     dbConnected: getDb() !== null,
     environment: env.nodeEnv,
-    ai: env.groqApiKey ? "groq" : "mock",
+    // "live" means a real model (self-hosted OpenAI-compatible server or Groq) will
+    // answer; the model name says which, so the UI never labels a local model "Groq".
+    ai: aiName,
+    aiModel: aiName === "live" ? forBackend()?.model || "unknown" : "mock",
     discovery: discoveryMode(),
     smtp: Boolean(env.smtpHost),
     replyWebhook: Boolean(env.replyIngestSecret),

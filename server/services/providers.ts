@@ -3,7 +3,8 @@ import { z } from "zod";
 import { env } from "../_core/env";
 import type { IcpCriteria } from "../../shared/types";
 import {
-  GroqProvider,
+  ChatCompletionProvider,
+  forBackend,
   type qualificationSchema,
   type researchSchema,
   type signalsSchema,
@@ -178,9 +179,10 @@ export class SearchQueryGenerator {
   }
 }
 
-// ── AI provider facade (Groq when configured, honest Mock otherwise) ──────────
+// ── AI provider facade (a live OpenAI-compatible backend when configured, honest
+// Mock otherwise) ────────────────────────────────────────────────────────────────
 export interface AiProvider {
-  readonly name: "groq" | "mock";
+  readonly name: "live" | "mock";
   generateICP(input: { service: string; target: string; geography: string }): Promise<IcpResult>;
   qualifyCompany(input: {
     offer: string;
@@ -298,9 +300,11 @@ class MockAIProvider implements AiProvider {
 
 let _ai: AiProvider | null = null;
 export function getAIProvider(): AiProvider {
-  if (env.groqApiKey) {
-    // GroqProvider already implements the AiProvider method set.
-    _ai = _ai instanceof GroqProvider ? _ai : new GroqProvider();
+  const backend = forBackend();
+  if (backend) {
+    // ChatCompletionProvider implements the AiProvider method set for any
+    // OpenAI-compatible server (self-hosted model or Groq).
+    _ai = _ai instanceof ChatCompletionProvider ? _ai : new ChatCompletionProvider(backend);
     return _ai;
   }
   return new MockAIProvider();
@@ -490,4 +494,4 @@ export function discoveryMode(): "scrapegraph" | "open" | "mock" {
   return getDiscoveryProvider().name;
 }
 
-export { GroqProvider };
+export { ChatCompletionProvider as GroqProvider };

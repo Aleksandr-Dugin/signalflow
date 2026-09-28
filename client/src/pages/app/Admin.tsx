@@ -187,7 +187,10 @@ export default function Admin() {
         <CardContent className="flex flex-wrap items-center gap-2 p-5">
           <span className="mr-2 inline-flex items-center gap-1.5 text-sm font-medium"><Activity className="h-4 w-4 text-primary" /> Integrations</span>
           <StatusChip ok={Boolean(status.data?.dbConnected)} label={status.data?.dbConnected ? "Database" : "No database"} />
-          <StatusChip ok={status.data?.ai === "groq"} label={status.data?.ai === "groq" ? "Groq AI" : "AI: mock"} />
+          <StatusChip
+            ok={status.data?.ai === "live"}
+            label={status.data?.ai === "live" ? `AI: ${status.data?.aiModel}` : "AI: mock"}
+          />
           <StatusChip
             ok={Boolean(status.data?.discovery) && status.data?.discovery !== "mock"}
             label={

@@ -58,7 +58,18 @@ export const env = {
   githubClientId: str("GITHUB_CLIENT_ID"),
   githubClientSecret: str("GITHUB_CLIENT_SECRET"),
 
-  // AI
+  // AI — the writing/classification leg. Any OpenAI-compatible /chat/completions
+  // server can power it: a self-hosted model (Bonsai/Ollama/vLLM) via AI_BASE_URL,
+  // or Groq via GROQ_API_KEY. AI_BASE_URL wins when both are set, so pointing the
+  // product at a local model is a config change, not a code change. None set => the
+  // honest labelled mock, never a silent pretend.
+  aiBaseUrl: str("AI_BASE_URL"),
+  aiModel: str("AI_MODEL"),
+  // Optional bearer for the AI_BASE_URL endpoint. Empty for most local servers,
+  // which accept unauthenticated requests on loopback.
+  aiApiKey: str("AI_API_KEY"),
+  // Kept as a working fallback so the live AI path does not depend on a self-hosted
+  // server existing yet.
   groqApiKey: str("GROQ_API_KEY"),
   groqModel: str("GROQ_MODEL", "openai/gpt-oss-20b"),
   aiCacheHours: num("AI_CACHE_HOURS", 24),

@@ -190,10 +190,14 @@ function checkConfig(): void {
 }
 
 function checkPipeline(): void {
-  if (!env.groqApiKey) {
-    record("warn", "AI", "GROQ_API_KEY unset — drafts and reply classification fall back to mock text. Nothing here is sendable to a real prospect.");
+  // Three honest states: a self-hosted OpenAI-compatible server, the Groq fallback,
+  // or no live model at all (mock). AI_BASE_URL wins when both are set.
+  if (env.aiBaseUrl) {
+    record("ok", "AI", `Live model at ${env.aiBaseUrl} (model ${env.aiModel || "UNSET — set AI_MODEL"}).`);
+  } else if (env.groqApiKey) {
+    record("ok", "AI", `Groq fallback (model ${env.groqModel}). For a self-hosted model set AI_BASE_URL/AI_MODEL.`);
   } else {
-    record("ok", "AI", `GROQ_API_KEY set (model ${env.groqModel}).`);
+    record("warn", "AI", "No AI backend configured (AI_BASE_URL / GROQ_API_KEY unset) — drafts and reply classification fall back to mock text. Nothing here is sendable to a real prospect.");
   }
 
   const engine = discoveryMode();

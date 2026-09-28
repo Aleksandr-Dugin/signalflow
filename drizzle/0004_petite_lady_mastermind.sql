@@ -1,0 +1,1 @@
+ALTER TABLE `personalizations` MODIFY COLUMN `provider` enum('groq','live','mock') NOT NULL DEFAULT 'live';

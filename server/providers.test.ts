@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import {
   canonicalDomain,
   canonicalizeUrl,
@@ -9,6 +9,7 @@ import {
   getDiscoveryProvider,
   type CompanyCandidate,
 } from "./services/providers";
+import { ChatCompletionProvider, forBackend } from "./services/groq";
 import { env } from "./_core/env";
 
 describe("canonicalDomain", () => {
@@ -117,8 +118,9 @@ describe.skipIf(Boolean(env.sgaiApiKey))("MockDiscovery", () => {
   });
 });
 
-// The mock provider is only used when no Groq key is configured.
-describe.skipIf(Boolean(env.groqApiKey))("MockAIProvider", () => {
+// The mock provider is only used when no live AI backend is configured.
+const liveBackendConfigured = () => forBackend() !== null;
+describe.skipIf(liveBackendConfigured())("MockAIProvider", () => {
   const ai = getAIProvider();
 
   it("reports mock", () => expect(ai.name).toBe("mock"));
@@ -152,5 +154,82 @@ describe.skipIf(Boolean(env.groqApiKey))("MockAIProvider", () => {
     expect((await ai.classify("Please unsubscribe", ["unsubscribe"])).label).toBe("unsubscribe");
     expect((await ai.classify("Sounds good, let's talk", ["interested"])).label).toBe("interested");
     expect((await ai.classify("?", ["question"])).label).toBe("question");
+  });
+});
+
+describe("ChatCompletionProvider", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("posts to the configured baseUrl and sends the auth header only when a key exists", async () => {
+    const calls: { url: string; headers: Record<string, string>; body: any }[] = [];
+    globalThis.fetch = (async (url: any, init: any) => {
+      calls.push({ url: String(url), headers: init.headers, body: JSON.parse(init.body) });
+      return {
+        ok: true,
+        json: async () => ({ choices: [{ message: { content: JSON.stringify({ label: "positive" }) } }] }),
+      };
+    }) as any;
+
+    const hosted = new ChatCompletionProvider({
+      baseUrl: "https://api.example.com/v1",
+      model: "some-model",
+      apiKey: "secret-key",
+      label: "openai-compatible",
+    });
+    const res = await hosted.classify("great news", ["positive", "negative"]);
+    expect(res.label).toBe("positive");
+    expect(calls[0].url).toBe("https://api.example.com/v1/chat/completions");
+    expect(calls[0].headers.Authorization).toBe("Bearer secret-key");
+    expect(calls[0].body.model).toBe("some-model");
+
+    // A local server on loopback has no key: no Authorization header is sent.
+    const local = new ChatCompletionProvider({
+      baseUrl: "http://127.0.0.1:8000/v1/",
+      model: "bonsai",
+      apiKey: "",
+      label: "local",
+    });
+    await local.classify("great news", ["positive"]);
+    expect(calls[1].url).toBe("http://127.0.0.1:8000/v1/chat/completions");
+    expect(calls[1].headers.Authorization).toBeUndefined();
+  });
+});
+
+describe("forBackend precedence", () => {
+  const snapshot = {
+    aiBaseUrl: env.aiBaseUrl,
+    aiModel: env.aiModel,
+    aiApiKey: env.aiApiKey,
+    groqApiKey: env.groqApiKey,
+    groqModel: env.groqModel,
+  };
+  afterEach(() => Object.assign(env, snapshot));
+
+  it("prefers a self-hosted AI_BASE_URL over the Groq key", () => {
+    env.aiBaseUrl = "http://127.0.0.1:8000/v1";
+    env.aiModel = "bonsai-27b";
+    env.groqApiKey = "gsk_should-be-ignored";
+    const b = forBackend();
+    expect(b?.baseUrl).toBe("http://127.0.0.1:8000/v1");
+    expect(b?.model).toBe("bonsai-27b");
+    expect(b?.label).toBe("openai-compatible");
+  });
+
+  it("falls back to Groq when only the key is set", () => {
+    env.aiBaseUrl = "";
+    env.groqApiKey = "gsk_present";
+    env.groqModel = "openai/gpt-oss-20b";
+    const b = forBackend();
+    expect(b?.baseUrl).toBe("https://api.groq.com/openai/v1");
+    expect(b?.label).toBe("groq");
+  });
+
+  it("returns null (so the caller mocks) when neither is configured", () => {
+    env.aiBaseUrl = "";
+    env.groqApiKey = "";
+    expect(forBackend()).toBeNull();
   });
 });

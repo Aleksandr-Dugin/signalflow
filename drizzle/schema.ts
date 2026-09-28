@@ -385,7 +385,11 @@ export const personalizations = mysqlTable(
     body: text("body").notNull().default(""),
     cta: text("cta").notNull().default(""),
     evidence: json("evidence"),
-    provider: mysqlEnum("provider", ["groq", "mock"]).notNull().default("groq"),
+    // Which engine wrote the draft. "groq" is retained for rows written before the
+    // AI leg became a pluggable OpenAI-compatible backend; "live" is what any real
+    // model (self-hosted or Groq) writes now. Widening, not renaming, so old rows
+    // and the schema-drift check stay valid.
+    provider: mysqlEnum("provider", ["groq", "live", "mock"]).notNull().default("live"),
     // cache key so identical personalization is not re-paid (audit P1)
     cacheKey: varchar("cache_key", { length: 64 }),
     approvedAt: timestamp("approved_at", { mode: "date" }),
