@@ -183,6 +183,8 @@ email (with a tracked t.me/<bot>?start=<ref> link)
   -> <ref> is looked up in outreach_messages -> prospect
   -> a channel_identities row is created          <- permission is born here, and only here
   -> a human may now write there (manual, per message)
+  -> every later message they send carries no <ref> at all, and is matched to
+     that row instead: it renews the window, records a revocation, or lifts one
 ```
 
 | Rule | Why |
@@ -195,6 +197,7 @@ email (with a tracked t.me/<bot>?start=<ref> link)
 | Sends are manual, rate-limited to 10/min per workspace, capped at 4000 characters | An autopilot on these platforms multiplies the reach of a sender whose reputation is one complaint from suspension. Approval stays with a person. |
 | Inbound events we cannot attribute to a prospect store **nothing** | A consent row without an owner would be a licence to message a stranger found later. |
 | WhatsApp attribution is by phone number, and a number matching more than one workspace binds nothing | The platform hands us no reference of ours. Cross-tenant search is allowed only to disambiguate, never to guess. |
+| A later message in an existing chat is attributed by the **identity row**, not by a link of ours | The `start` parameter arrives exactly once, when they open the chat. Anything after that — including `STOP` — can only be placed by matching `(channel, externalId)` against identities already held, and an id known in two workspaces binds nothing. Revocation that needed a fresh deep link would be revocation that does not work. |
 | The webhook endpoints refuse everything until their verification secret is configured | Telegram cannot sign payloads, so the `secret_token` we registered is echoed back as `X-Telegram-Bot-Api-Secret-Token`; WhatsApp bodies carry `X-Hub-Signature-256`, an HMAC over the raw body. Both are compared with `timingSafeEqual`, and both are checked before the payload is interpreted. |
 | A `telegram` CTA click records evidence and advances **no** stage | `cta_clicked:telegram` maps to `null` in the stage table. Opening a chat is not a buying signal; treating it as one would inflate the funnel with courtesy clicks. |
 | Inbound channel messages land in `email_events` under a `telegram:<id>` address | The classifier, the thread and the GDPR export keep working without learning a new table per platform; `getProspectThread()` reads the medium back out of that address and labels it. |

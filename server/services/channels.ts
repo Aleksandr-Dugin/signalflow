@@ -462,6 +462,23 @@ export async function recordChannelInbound(inbound: ChannelInbound): Promise<Inb
     }
   }
   if (!prospectId) {
+    // A message from a chat that already exists carries no reference of ours: the /start
+    // parameter arrives exactly once, when the person opens the link. An identity we
+    // already hold is therefore the other legitimate way to attribute an event - and
+    // without it, "STOP" could never be tied to the person who sent it, which would
+    // break the one promise this channel exists to keep.
+    const known = await knownIdentities(db, inbound.channel, inbound.externalId);
+    if (known.length === 1) {
+      workspaceId = known[0].workspaceId;
+      prospectId = known[0].prospectId;
+    } else if (known.length > 1) {
+      // The same platform id recognised in more than one tenant: whose conversation
+      // this is stays undetermined, and guessing would write one tenant's chat into
+      // another's pipeline.
+      return { handled: true, attributed: false, reason: "sender_matches_multiple_workspaces" };
+    }
+  }
+  if (!prospectId) {
     return { handled: true, attributed: false, reason: "no_prospect_for_this_sender" };
   }
 
@@ -521,6 +538,30 @@ export async function recordChannelInbound(inbound: ChannelInbound): Promise<Inb
     });
   const duplicate = ((inserted as unknown as [{ affectedRows?: number }])[0]?.affectedRows ?? 0) === 0;
   return { handled: true, attributed: true, duplicate, prospectId };
+}
+
+/**
+ * Where a platform id is already recognised as somebody's identity, across every
+ * tenant. Not scoped by workspace because the webhook has nothing else to go on, and
+ * the result is a routing decision rather than any disclosure of data. Misattribution
+ * here can only ever move a message toward *less* contact: the worst it does is
+ * record an inbound we could not otherwise place, or honour a stop request.
+ */
+async function knownIdentities(
+  db: Db,
+  channel: MessagingChannel,
+  externalId: string,
+): Promise<{ workspaceId: string; prospectId: string }[]> {
+  return db
+    .select({
+      workspaceId: schema.channelIdentities.workspaceId,
+      prospectId: schema.channelIdentities.prospectId,
+    })
+    .from(schema.channelIdentities)
+    .where(
+      and(eq(schema.channelIdentities.channel, channel), eq(schema.channelIdentities.externalId, externalId)),
+    )
+    .limit(2);
 }
 
 async function findIdentity(

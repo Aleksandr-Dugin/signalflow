@@ -665,26 +665,36 @@ suite("autonomous loop against a real database", () => {
   // A subject access request and an erasure are the two operations the privacy page
   // promises; the "we will look through the database" version is a promise nobody can
   // keep in one sitting, so it is tested here against real rows. Uses its own second
-  // person so the shared fixture the other tests depend on is left intact.
+  // company as well as its own second person, because a campaign is allowed exactly one
+  // prospect per company—the constraint, not the test, decides that.
   it("answers and honours a request about one email address", async () => {
     const subject = `erasure-${run}@acme-corp.example`;
     const secondProspectId = `p_erased_${run}`;
     const secondContactId = `ct_erased_${run}`;
+    const secondCompanyId = `co2_${run}`;
+    await db!.insert(schema.companies).values({
+      id: secondCompanyId,
+      workspaceId,
+      name: `Erase Me Ltd ${run}`,
+      domain: `erasure-${run}.example`,
+      industry: "SaaS",
+      origin: "live",
+    });
     await db!.insert(schema.contacts).values({
       id: secondContactId,
       workspaceId,
-      companyId,
+      companyId: secondCompanyId,
       name: "Erase Me",
       title: "Ops Lead",
       email: subject,
       origin: "page",
-      sourceUrl: `https://acme-corp-${run}.example/team`,
+      sourceUrl: `https://erasure-${run}.example/team`,
     });
     await db!.insert(schema.prospects).values({
       id: secondProspectId,
       workspaceId,
       campaignId,
-      companyId,
+      companyId: secondCompanyId,
       contactId: secondContactId,
       status: "qualified",
       origin: "live",
@@ -747,6 +757,7 @@ suite("autonomous loop against a real database", () => {
 
     await db!.delete(schema.prospects).where(eq(schema.prospects.id, secondProspectId));
     await db!.delete(schema.suppressions).where(eq(schema.suppressions.email, subject));
+    await db!.delete(schema.companies).where(eq(schema.companies.id, secondCompanyId));
   });
 
   // Kept last: it flips a global switch, so it must not overlap with any test

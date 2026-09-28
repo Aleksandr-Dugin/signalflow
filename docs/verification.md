@@ -50,9 +50,10 @@ What CI already covers (`.github/workflows/ci.yml`):
   is acknowledged rather than stored), and in a second boot with no channel credentials at
   all, where every inbound route answers `503`.
 
-> **Status: executed and green.** CI run #3
-> (`161b133`) passed both jobs on real MySQL 8: migrations applied from the
-> baseline journal, and the integration suite ran to completion. The
+> **Status: green as of CI run #16. Runs #12-#15 were red, and this page said "green"
+> through all of them.** The failure mode was not a flaky test; it was a claim nobody
+> checked. This machine cannot run Docker at all (`wsl -l` reports Windows Subsystem for
+> Linux is not installed, so the Linux engine answers `request returned 500`), which means
 > `REQUIRE_INTEGRATION_TESTS` flag set in the integration job is what makes that
 > statement meaningful — without it the suite could have reported success from a
 > file of silent skips, which is exactly how run #1 nearly fooled us. Two real bugs
@@ -343,8 +344,12 @@ agrees.
 - [ ] On a prospect with **no** channel row, confirm the send is refused in words that say
       what to do ("never written to us … link in your email"), and that the refusal is
       shown to the user, not just logged. Nothing may be sent to a number you merely stored.
-- [ ] Send `STOP` to the bot. Confirm the row is revoked, that the send box is disabled with
-      the revocation date, and that writing again reopens it. Then block the bot and send:
+- [ ] Send `STOP` to the bot as a bare message, carrying no `start` parameter - which is
+      what a reply in an existing chat actually looks like, and the live form of the CI case
+      that found the attribution bug: nothing but the identity row can tie such a message to
+      a person, so if that path is broken, revocation is unreachable. Confirm the row is
+      revoked, that the send box is disabled with the revocation date, and that writing
+      again reopens it. Then block the bot and send:
       the platform's `bot was blocked` error must be recorded as a revocation and a `failed`
       message, never as `sent`.
 - [ ] With only `TELEGRAM_BOT_TOKEN` set and no webhook secret, boot the server and read the
