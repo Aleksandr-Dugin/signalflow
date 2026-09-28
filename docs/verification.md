@@ -50,7 +50,8 @@ What CI already covers (`.github/workflows/ci.yml`):
   is acknowledged rather than stored), and in a second boot with no channel credentials at
   all, where every inbound route answers `503`.
 
-> **Status: runs #12-#15 were red, and this page said "green" through all of them.**
+> **Status: green as of CI run #18 (`eb8cc04`). It was red for runs #12 through #17,**
+> **and this page said "green" through all of them.**
 > The failure mode was not a flaky test; it was a claim nobody checked. This machine
 > cannot run Docker at all (`wsl -l` reports that Windows Subsystem for Linux is not
 > installed, so the Linux engine answers `request returned 500`), which means
@@ -85,11 +86,13 @@ What CI already covers (`.github/workflows/ci.yml`):
 >
 > `REQUIRE_INTEGRATION_TESTS` on the runner is what makes "the suite ran" mean "the
 > suite executed": without it a file of silent skips reports success, which is how
-> run #1 nearly fooled us - and runs #12-#15 fooled us one level higher up, at the
+> run #1 nearly fooled us - and runs #12-#17 fooled us one level higher up, at the
 > summary line. The rule this leaves behind: after any push that touches
 > `integration.test.ts`, open the run on GitHub and read it before writing a word about
-> it being green. Run #18 carries all five fixes; confirm it before repeating any claim
-> on this page. `pnpm smoke` passes locally and on the runner either way - it needs no
+> it being green. Run #18 is that check: 17 integration cases executed against real
+> MySQL rather than skipping, which makes this the first time the messenger permission
+> lifecycle and the erasure walkthrough have ever run against a database at all.
+> `pnpm smoke` passes locally and on the runner either way - it needs no
 > database, so it proves the HTTP edge and nothing about the schema. Note the shape of
 > this failure: fixing two red tests revealed three more that had never been reached, so
 > "I fixed the two bugs" is not the same statement as "CI is green", and only the second
