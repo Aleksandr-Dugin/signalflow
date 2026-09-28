@@ -752,8 +752,19 @@ suite("autonomous loop against a real database", () => {
     expect(
       jobRunsMentioning(stillQueued, { prospectIds: [secondProspectId], email: subject.toLowerCase() }),
     ).toEqual([]);
+    // An erasure is not a blank page, and pretending otherwise would break the promise.
+    // The address stays on the suppression list - the only thing standing between this
+    // request and the next discovery run - so the export afterwards must show precisely
+    // that and nothing else about them.
     const after = await exportSubjectData(workspaceId, subject);
-    expect(after).toBeNull();
+    expect(after).not.toBeNull();
+    expect(after!.contacts).toEqual([]);
+    expect(after!.outreach).toEqual([]);
+    expect(after!.emailEvents).toEqual([]);
+    expect(after!.prospects).toEqual([]);
+    expect(after!.channels).toEqual([]);
+    expect(after!.pendingJobs).toEqual([]);
+    expect(after!.suppressions.map((s) => s.reason)).toEqual(["unsubscribe"]);
 
     // The company record survives, detached from the person: erasing one data subject
     // must not destroy research about somebody else.
@@ -764,7 +775,9 @@ suite("autonomous loop against a real database", () => {
 
     // And the same address is not collected again afterwards — the rule that makes
     // the erasure last longer than the next discovery run.
-    await db!.insert(schema.suppressions).values({ id: `sp_${run}`, workspaceId, email: subject, reason: "unsubscribe" });
+    // Nothing is inserted to set this up: the "remove me" reply earlier in this test is
+    // what put the address on the list, and that is the path that has to hold. Writing a
+    // second row here would trip the unique index - which is itself the guarantee.
     expect(await addressWasForgotten(workspaceId, subject)).toBe(true);
     expect(await addressWasForgotten(`ws_other_${run}`, subject)).toBe(false);
 

@@ -55,7 +55,7 @@ What CI already covers (`.github/workflows/ci.yml`):
 > cannot run Docker at all (`wsl -l` reports that Windows Subsystem for Linux is not
 > installed, so the Linux engine answers `request returned 500`), which means
 > `server/integration.test.ts` has been skipping itself on every local run since then
-> while still printing a reassuring "214 passed". Four things were wrong in that file,
+> while still printing a reassuring "214 passed". Five things were wrong in that file,
 > and the runner found them one at a time, each hidden behind the last:
 >
 > 1. The subject-access test inserted its second prospect on the *shared* fixture
@@ -76,16 +76,22 @@ What CI already covers (`.github/workflows/ci.yml`):
 >    only appeared to hold because failure 1 aborted the erasure test before it could
 >    leave a queued job behind. It now compares against a snapshot of what was already
 >    queued when the lever was pulled - which is the claim it meant to make anyway.
+> 5. The same test asserted the post-erasure export was `null`. It is not, and must not
+>    be: the "remove me" reply puts the address on the suppression list, and that entry
+>    is the only thing which outlives the erasure and keeps the next discovery run from
+>    collecting the person again. The assertion contradicted this page's own description
+>    of the case, and a duplicate suppression insert queued behind it would then have
+>    tripped the unique index. Both now assert what the promise actually is.
 >
 > `REQUIRE_INTEGRATION_TESTS` on the runner is what makes "the suite ran" mean "the
 > suite executed": without it a file of silent skips reports success, which is how
 > run #1 nearly fooled us - and runs #12-#15 fooled us one level higher up, at the
 > summary line. The rule this leaves behind: after any push that touches
 > `integration.test.ts`, open the run on GitHub and read it before writing a word about
-> it being green. Run #17 carries all four fixes; confirm it before repeating any claim
+> it being green. Run #18 carries all five fixes; confirm it before repeating any claim
 > on this page. `pnpm smoke` passes locally and on the runner either way - it needs no
 > database, so it proves the HTTP edge and nothing about the schema. Note the shape of
-> this failure: fixing two red tests revealed two more that had never been reached, so
+> this failure: fixing two red tests revealed three more that had never been reached, so
 > "I fixed the two bugs" is not the same statement as "CI is green", and only the second
 > one is worth writing down. What remains genuinely unverified is everything below, which
 > no container can cover.
