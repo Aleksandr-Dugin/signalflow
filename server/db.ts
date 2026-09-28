@@ -17,7 +17,12 @@ import type { PlanId } from "../shared/plans";
 import { getPlan } from "../shared/plans";
 import { detectObjections } from "../shared/const";
 import { ensureWorkspace } from "./services/auth";
-import { isAutopilotGloballyPaused } from "./services/autonomyState";
+import {
+  autonomyStatus,
+  isAutopilotGloballyPaused,
+  readGlobalAutonomyState,
+  type AutonomyStatus,
+} from "./services/autonomyState";
 import {
   enforceFeature,
   enforceLimit,
@@ -1146,23 +1151,47 @@ export async function setAutopilot(workspaceId: string, enabled: boolean): Promi
 }
 
 /**
- * The two facts the Settings screen needs, kept apart on purpose.
+ * The facts the interface needs, kept apart on purpose.
  *
- * Returning only the *effective* state would make an operator's global pause
- * look like the workspace had switched itself off, and the owner would then
- * "fix" a toggle that was never the problem — while the platform stayed paused.
+ * Returning only the *effective* state would make an operator's global pause look
+ * like the workspace had switched itself off, and the owner would then "fix" a
+ * toggle that was never the problem — while the platform stayed paused.
+ *
+ * Three autonomy answers rather than a `globalPaused` boolean, because the boolean
+ * conflated two very different situations that call for different sentences: a
+ * human pulled the lever (work is held, and resumes), and the switch could not be
+ * read at all — no database, or a deployment that has not run the migration yet
+ * (fail-closed, so nothing is sending, and *resuming will not help* until the
+ * schema is fixed). Reporting that second case as "paused" told the operator to go
+ * find the person with the lever, who does not exist.
  */
-export async function autopilotState(
-  workspaceId: string,
-): Promise<{ enabled: boolean; globalPaused: boolean }> {
+export async function autopilotState(workspaceId: string): Promise<{
+  enabled: boolean;
+  autonomy: AutonomyStatus;
+  /** Why a human paused it, verbatim from the Admin control. */
+  pausedReason: string | null;
+  pausedAt: string | null;
+}> {
   const db = getDb();
-  if (!db) return { enabled: false, globalPaused: true };
-  const [ws] = await db
-    .select({ autopilot: schema.workspaces.autopilot })
-    .from(schema.workspaces)
-    .where(eq(schema.workspaces.id, workspaceId))
-    .limit(1);
-  return { enabled: Boolean(ws?.autopilot), globalPaused: await isAutopilotGloballyPaused() };
+  const [ws] = db
+    ? await db
+        .select({ autopilot: schema.workspaces.autopilot })
+        .from(schema.workspaces)
+        .where(eq(schema.workspaces.id, workspaceId))
+        .limit(1)
+    : [];
+  const state = await readGlobalAutonomyState();
+  // One predicate decides the status and the two facts that go with it, so the
+  // reason cannot be reported for a state the interface does not call paused.
+  const paused = autonomyStatus(state) === "paused";
+  return {
+    // The stored preference. Meaningless while `autonomy` is not "live", which is
+    // why the UI renders it as "armed" instead of "on" in that case.
+    enabled: Boolean(ws?.autopilot),
+    autonomy: autonomyStatus(state),
+    pausedReason: paused && state?.pausedReason ? state.pausedReason : null,
+    pausedAt: paused && state?.pausedAt ? state.pausedAt.toISOString() : null,
+  };
 }
 
 // ── Admin / system health ──────────────────────────────────────────────────

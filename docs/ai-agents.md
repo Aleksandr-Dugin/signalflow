@@ -41,6 +41,19 @@ Properties that are load-bearing, and asserted by tests:
 - **Queued work is held, not dropped.** It runs on resume, so pausing during an
   incident neither sends the burst nor loses the pipeline.
 - **Two independent enforcement points.** Both are needed; see the table above.
+- **No screen may call it live while it is held.** `autonomyStatus()` maps the same row to
+  `live | paused | unreadable` for the interface, using the identical strict `=== false`
+  polarity as `autonomyAllowed()` — a test asserts the two can never disagree in the
+  direction that hides sending. `paused` and `unreadable` stay separate because the
+  remedies differ: one is a person holding a lever, the other is a deployment that cannot
+  read its own switch (no database, unapplied migration), and "go release the pause" is a
+  dead end for the second. `client/src/components/autonomy.tsx` renders it once, in the app
+  shell, above every page — a paused platform makes *all* of them quietly untrue
+  (campaigns look active, replies look answered, the funnel looks like it is progressing),
+  and an operator who has to open Admin to find out why concludes the software is broken.
+  The banner also states the thing no queue view can show: pausing stops a follow-up from
+  ever being *created*, so a reply that arrives during the pause is still unanswered after
+  the resume, and the inbox has to be read by hand while it is up.
 
 ## The one loop that runs unattended
 

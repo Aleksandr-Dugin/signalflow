@@ -31,6 +31,28 @@ export function autonomyAllowed(state: GlobalAutonomyState | null): boolean {
   return state !== null && state.autopilotPaused === false;
 }
 
+/**
+ * What the interface is allowed to claim, as three answers rather than one boolean.
+ *
+ * `autonomyAllowed()` collapses null and paused because the *worker* must stop in both
+ * cases and does not care why. An operator does: "a person pulled the lever" is fixed
+ * by going and asking, "the switch cannot be read" (no database, or a deployment that
+ * has not run the migration) is fixed by deploying. Reporting the second as the first
+ * sends someone looking for a lever that does not exist — and a paused platform that
+ * reads as merely paused is how a broken deployment mails nobody for a week.
+ */
+export type AutonomyStatus = "live" | "paused" | "unreadable";
+
+export function autonomyStatus(state: GlobalAutonomyState | null): AutonomyStatus {
+  if (state === null) return "unreadable";
+  // The same strict reading as autonomyAllowed(), and for the same reason: anything
+  // that is not an explicit `false` is not live. A truthy test here would show
+  // "live" for a row whose column came back undefined — the shape of a partially
+  // applied migration — while the worker was refusing to run any of it, which is
+  // precisely the discrepancy an operator is supposed to be told about.
+  return state.autopilotPaused === false ? "live" : "paused";
+}
+
 function toState(row: typeof schema.systemState.$inferSelect): GlobalAutonomyState {
   return {
     autopilotPaused: row.autopilotPaused,

@@ -273,6 +273,31 @@ the pages render with a "Draft — not yet fit to publish" banner (`/privacy`, `
       These endpoints read the whole subject graph, so they are the one user-facing path
       worth hammering on purpose.
 
+### 11. What a paused platform says about itself
+
+The failure this covers is a screen that is quietly untrue: autonomy is held, and every
+page still looks like a system that is working.
+
+- [ ] Pull the master switch in Admin, then open Overview, a campaign, a prospect and
+      Settings as a **non-admin** member. The banner must be on all of them within ~30 s
+      without a manual reload (the query refetches on that interval), and it must contain
+      the reply-during-pause consequence, not just "paused".
+- [ ] Check the Settings chip reads "paused by operator" and the workspace's own toggle is
+      still where the owner left it. If it flipped to "off", the two facts have collapsed
+      back into one and the owner will go "fix" a setting that was never wrong.
+- [ ] While paused, send a real reply to the inbox and confirm in `job_runs` that **no row
+      was created** — not a queued row that is merely held. Resume afterwards and confirm
+      the work queued *before* the pause runs, while that reply still gets nothing. That
+      asymmetry is what the banner promises, and it is the reason the inbox must be read by
+      hand during an incident.
+- [ ] Break the database on purpose (wrong `DATABASE_URL`, or drop `system_state`) and load
+      the app: the banner must switch to "Autonomy status cannot be read" and say the
+      deployment is what needs fixing. If it still says "paused", it is sending the operator
+      to look for a lever that does not exist.
+- [ ] Confirm a non-admin sees "Only a platform operator can resume it" and no Admin link.
+- [ ] On Admin, confirm the *Recurring discovery* tile carries the "held" hint while the
+      switch is out — a schedule that is not firing must not be printed as a bare interval.
+
 ## Known limitation: Stripe Payment Links join on email
 
 A Stripe Payment Link is one static URL, so it cannot carry per-contact metadata.

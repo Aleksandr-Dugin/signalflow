@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Logo, ThemeToggle, Spinner, ScrollProgress } from "@/components/common";
+import { AutonomyHoldBanner } from "@/components/autonomy";
 import Overview from "@/pages/app/Overview";
 import Onboarding from "@/pages/app/Onboarding";
 import Campaigns from "@/pages/app/Campaigns";
@@ -110,6 +111,13 @@ export default function AppShell() {
           </div>
         </header>
         <main className="mx-auto w-full max-w-6xl flex-1 p-6">
+          {/* Above the route, not inside one page: a paused platform makes every
+              screen in here quietly untrue — campaigns look active, replies look
+              answered, the queue looks like it is progressing — and the operator
+              reading any of them is the one who is not going to Admin. */}
+          <div className="mb-4 empty:hidden">
+            <AutonomyHoldBanner isAdmin={isAdmin} />
+          </div>
           <div key={loc} className="route-enter">
           <Switch>
             <Route path="/" component={Overview} />

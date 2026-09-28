@@ -9,6 +9,7 @@ import {
 } from "../shared/const";
 import {
   autonomyAllowed,
+  autonomyStatus,
   type GlobalAutonomyState,
 } from "./services/autonomyState";
 
@@ -91,5 +92,51 @@ describe("global autonomy switch", () => {
     expect(autonomyAllowed({ ...state(), autopilotPaused: undefined as never })).toBe(false);
     expect(autonomyAllowed({ ...state(), autopilotPaused: "false" as never })).toBe(false);
     expect(autonomyAllowed({} as unknown as GlobalAutonomyState)).toBe(false);
+  });
+});
+
+// The same switch, read for a human instead of for the worker. The UI promise is
+// that a screen never says work is happening while nothing is running — so these
+// polarities have to match `autonomyAllowed()` even though the vocabulary differs.
+describe("autonomyStatus: what the interface may claim", () => {
+  const state = (over: Partial<GlobalAutonomyState> = {}): GlobalAutonomyState => ({
+    autopilotPaused: false,
+    pausedReason: "",
+    pausedBy: null,
+    pausedAt: null,
+    ...over,
+  });
+
+  it("says live only for an explicitly un-paused switch", () => {
+    expect(autonomyStatus(state())).toBe("live");
+  });
+
+  it("names a pulled lever as paused, not as broken", () => {
+    // The distinction the operator acts on: "paused" means go ask whoever holds the
+    // switch, and queued work will run when it is released.
+    expect(autonomyStatus(state({ autopilotPaused: true, pausedReason: "incident" }))).toBe("paused");
+  });
+
+  it("separates an unreadable switch from a paused one", () => {
+    // Both stop sending, so `autonomyAllowed()` collapses them — but telling the
+    // operator to release a pause that does not exist is a dead end, and this is the
+    // case that means the deployment itself (no database, unmigrated schema) is wrong.
+    expect(autonomyStatus(null)).toBe("unreadable");
+  });
+
+  it("never calls a malformed row live", () => {
+    // Same strict `=== false` as the worker's own check, so a screen cannot report
+    // autonomy while every job claim is being refused.
+    expect(autonomyStatus({ ...state(), autopilotPaused: undefined as never })).toBe("paused");
+    expect(autonomyStatus({} as unknown as GlobalAutonomyState)).toBe("paused");
+  });
+
+  it("agrees with the worker in every state", () => {
+    // The two readers of one switch must never disagree in a way that hides sending:
+    // whenever this says live, the worker must be allowed to run.
+    for (const candidate of [state(), state({ autopilotPaused: true }), null]) {
+      if (autonomyStatus(candidate) === "live") expect(autonomyAllowed(candidate)).toBe(true);
+      else expect(autonomyAllowed(candidate)).toBe(false);
+    }
   });
 });

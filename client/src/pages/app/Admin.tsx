@@ -207,7 +207,17 @@ export default function Admin() {
         <Stat label="Opportunities" value={c?.opportunities ?? 0} />
         <Stat label="Outreach sent" value={c?.outreachSent ?? 0} />
         <Stat label="Email events" value={c?.repliesInbound ?? 0} hint="inbound + outbound" />
-        <Stat label="Recurring discovery" value={status.data?.discoveryIntervalHours ? `every ${status.data?.discoveryIntervalHours}h` : "off"} />
+        <Stat
+          label="Recurring discovery"
+          value={status.data?.discoveryIntervalHours ? `every ${status.data?.discoveryIntervalHours}h` : "off"}
+          /* "every 24h" describes a schedule that is not firing while the switch is held,
+             and a number that implies motion is a claim this card has to qualify. */
+          hint={
+            status.data?.discoveryIntervalHours && paused
+              ? "held — autonomy is not live, the next run will not start"
+              : undefined
+          }
+        />
       </div>
 
       {/* Jobs */}

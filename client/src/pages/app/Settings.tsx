@@ -8,6 +8,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useAutonomy } from "@/components/autonomy";
+import { cn } from "@/lib/utils";
 import { PageHeader, ThemeToggle } from "@/components/common";
 
 export default function Settings() {
@@ -16,7 +18,7 @@ export default function Settings() {
   const me = trpc.workspace.me.useQuery();
   const profile = trpc.workspace.profile.useQuery();
   const providers = trpc.auth.providers.useQuery();
-  const autopilot = trpc.workspace.autopilot.useQuery();
+  const autopilot = useAutonomy();
   const setAutopilot = trpc.workspace.setAutopilot.useMutation({
     onSuccess: (r) => {
       // Wording has to survive the global pause: promising that AI "will send"
@@ -28,15 +30,17 @@ export default function Settings() {
     onError: (e) => toast.error(e.message),
   });
 
-  // This workspace's own choice, and whether a platform operator has overridden
-  // it — kept apart deliberately. Collapsing the two would make an operator's
-  // pause look like this workspace had switched itself off, inviting the owner
-  // to "fix" a toggle that is not why nothing is sending.
+  // This workspace's own choice, and what the platform is doing above it — kept
+  // apart deliberately. Collapsing the two would make an operator's pause look like
+  // this workspace had switched itself off, inviting the owner to "fix" a toggle
+  // that is not why nothing is sending.
   const ownAutopilot = autopilot.data?.enabled ?? false;
-  // `undefined` until the query answers. Defaulting it to false would label the
-  // workspace "live" for a moment on every page load, and "live" is the claim
-  // this line exists to withhold while the truth is unknown.
-  const operatorPaused = autopilot.data?.globalPaused;
+  // `undefined` until the query answers, and `"unreadable"` is not the same fact as
+  // `"paused"`: one is a person holding a lever, the other is a deployment that
+  // cannot read anything and is not fixed by going to find that person. Defaulting
+  // any of this would label the workspace "live" for a moment on every page load,
+  // and "live" is the claim this line exists to withhold while the truth is unknown.
+  const autonomy = autopilot.data?.autonomy;
 
   // Data-subject requests. Kept here rather than on each prospect page because the
   // request arrives as an email address, not as one of our ids — and the answer has
@@ -138,24 +142,40 @@ export default function Settings() {
                 {/* Still editable while paused: recording a preference costs nothing, and
                     blocking it would make owners re-enter a setting that was never wrong. */}
                 <span
-                  className={`font-mono text-[10px] uppercase tracking-wider ${
-                    operatorPaused ? "text-destructive" : "text-muted-foreground"
-                  }`}
+                  className={cn(
+                    "font-mono text-[10px] uppercase tracking-wider",
+                    autonomy === "paused"
+                      ? "text-amber-500"
+                      : autonomy === "unreadable"
+                        ? "text-destructive"
+                        : "text-muted-foreground",
+                  )}
                 >
-                  {operatorPaused === undefined
+                  {autonomy === undefined
                     ? "checking…"
-                    : operatorPaused
-                      ? "paused by operator"
-                      : ownAutopilot
-                        ? "live"
-                        : "off"}
+                    : autonomy === "unreadable"
+                      ? "status unreadable"
+                      : autonomy === "paused"
+                        ? "paused by operator"
+                        : ownAutopilot
+                          ? "live"
+                          : "off"}
                 </span>
               </div>
             </div>
-            {operatorPaused ? (
+            {autonomy === "paused" ? (
+              <p className="mb-2 text-xs text-amber-500">
+                A platform operator has paused all autonomy. This workspace's choice is saved and
+                takes effect again the moment autonomy resumes — nothing sends meanwhile, and a
+                reply that arrives during the pause will not be followed up automatically
+                afterwards either.
+              </p>
+            ) : null}
+            {autonomy === "unreadable" ? (
               <p className="mb-2 text-xs text-destructive">
-                A platform operator has paused all autonomy. This workspace's choice is saved and takes
-                effect again the moment autonomy resumes — nothing sends meanwhile.
+                The autonomy switch itself cannot be read — no database, or migrations that have
+                not been applied. Autonomy fails closed, so nothing is sending; releasing the pause
+                in Admin will not help until the deployment can be read again.
               </p>
             ) : null}
             <p className="text-xs text-muted-foreground">
