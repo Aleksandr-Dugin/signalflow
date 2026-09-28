@@ -278,6 +278,24 @@ function checkPipeline(): void {
   } else {
     record("ok", "inbound", "REPLY_INGEST_SECRET set.");
   }
+
+  // Per-workspace mailboxes are optional, so an entirely-unconfigured deployment is
+  // reported as off rather than as a failure. A half-configured one is a real warning:
+  // it means an operator started wiring this and left it in a state that cannot send.
+  const anyMailApp = Boolean(
+    (env.gmailOAuthClientId && env.gmailOAuthClientSecret) || (env.msOAuthClientId && env.msOAuthClientSecret),
+  );
+  if (!env.mailCredentialKey && !anyMailApp) {
+    record("ok", "mailboxes", "Per-workspace mailboxes off (optional). Set MAIL_CREDENTIAL_KEY plus a Gmail/Microsoft OAuth app to let users send from their own address.");
+  } else if (!env.mailCredentialKey) {
+    record("warn", "mailboxes", "An OAuth app is registered but MAIL_CREDENTIAL_KEY is unset, so linking is disabled: tokens could not be stored securely.");
+  } else if (!anyMailApp) {
+    record("warn", "mailboxes", "MAIL_CREDENTIAL_KEY is set but no Gmail/Microsoft OAuth app is registered, so users cannot link a mailbox yet.");
+  } else if (!env.mailboxDeliveryVerified) {
+    record("warn", "mailboxes", "Mailboxes can be linked but sending stays gated (MAILBOX_DELIVERY_VERIFIED=false). Set it true only after Google/Microsoft have verified the app.");
+  } else {
+    record("ok", "mailboxes", "Mailbox linking and sending are live (MAILBOX_DELIVERY_VERIFIED=true).");
+  }
 }
 
 function checkConversions(): void {

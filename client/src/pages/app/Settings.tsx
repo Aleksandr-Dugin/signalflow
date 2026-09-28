@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "wouter";
 import { toast } from "sonner";
 import { Bot, Download, Mail, ShieldCheck, ShieldOff, Trash2 } from "lucide-react";
@@ -41,6 +41,43 @@ export default function Settings() {
   // any of this would label the workspace "live" for a moment on every page load,
   // and "live" is the claim this line exists to withhold while the truth is unknown.
   const autonomy = autopilot.data?.autonomy;
+
+  // "Send from my own mailbox". capabilities() decides what the buttons can honestly
+  // do, so the UI never offers a connect that would only throw; status() lists what is
+  // already linked. Both are cheap and read-only.
+  const mailboxCaps = trpc.mailbox.capabilities.useQuery();
+  const mailboxes = trpc.mailbox.status.useQuery();
+  const disconnectMailbox = trpc.mailbox.disconnect.useMutation({
+    onSuccess: () => {
+      toast.success("Mailbox unlinked. Outreach will no longer send from it.");
+      void utils.mailbox.status.invalidate();
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const connectMailbox = trpc.mailbox.connect.useMutation({
+    // Hand off to the provider's consent screen; it returns to
+    // /api/mailbox/oauth/callback, which lands back here with ?mailbox=<result>.
+    onSuccess: (r) => {
+      window.location.href = r.url;
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  // Report the outcome of the OAuth round-trip once, then clear the query param so a
+  // reload does not repeat the toast. `linked_gated` is a success with a caveat, so it
+  // is worded as such rather than as "connected".
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get("mailbox");
+    if (!result) return;
+    params.delete("mailbox");
+    const qs = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+    if (result === "connected") toast.success("Mailbox connected — outreach can now send from it.");
+    else if (result === "linked_gated")
+      toast.info("Mailbox linked. Sending stays off until the operator's OAuth app is verified.");
+    else toast.error(`Mailbox linking did not complete (${result}).`);
+    void utils.mailbox.status.invalidate();
+  }, [utils]);
 
   // Data-subject requests. Kept here rather than on each prospect page because the
   // request arrives as an email address, not as one of our ids — and the answer has
@@ -182,6 +219,95 @@ export default function Settings() {
               Requires <code>SMTP_*</code> and <code>REPLY_INGEST_SECRET</code>. Wire your ESP to
               <code> /api/replies/webhook/&lt;provider&gt;</code> so inbound mail reaches the pipeline.
             </p>
+          </CardContent>
+        </Card>
+
+        <Card className="sm:col-span-2">
+          <CardContent className="p-6">
+            <h2 className="flex items-center gap-2 font-semibold">
+              <Mail className="h-4 w-4 text-primary" /> Send from your own mailbox
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Link your Gmail or Microsoft account so outreach leaves from your own address
+              instead of the shared sending server. Replies to those emails are pulled back into
+              the same pipeline automatically.
+            </p>
+
+            {mailboxCaps.data && !mailboxCaps.data.cryptoConfigured ? (
+              <p className="mt-3 rounded-md border border-[var(--brutal-line)] bg-card p-2 text-xs text-muted-foreground">
+                Mailbox linking is disabled on this deployment: the operator has not set a
+                credential key, so tokens could not be stored securely.
+              </p>
+            ) : null}
+            {mailboxCaps.data?.cryptoConfigured &&
+            !mailboxCaps.data.providers.gmail &&
+            !mailboxCaps.data.providers.microsoft ? (
+              <p className="mt-3 rounded-md border border-[var(--brutal-line)] bg-card p-2 text-xs text-muted-foreground">
+                No mail provider is available yet: the operator has not registered an OAuth app
+                (Gmail or Microsoft) for this deployment.
+              </p>
+            ) : null}
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              {(["gmail", "microsoft"] as const).map((provider) => {
+                const available =
+                  Boolean(mailboxCaps.data?.cryptoConfigured) && Boolean(mailboxCaps.data?.providers[provider]);
+                return (
+                  <Button
+                    key={provider}
+                    variant="outline"
+                    size="sm"
+                    disabled={!available || connectMailbox.isPending}
+                    onClick={() => connectMailbox.mutate({ provider })}
+                  >
+                    {provider === "gmail" ? "Connect Gmail" : "Connect Microsoft"}
+                  </Button>
+                );
+              })}
+            </div>
+
+            {mailboxes.data && mailboxes.data.length > 0 ? (
+              <ul className="mt-4 space-y-2">
+                {mailboxes.data.map((m) => (
+                  <li
+                    key={m.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[var(--brutal-line)] bg-card p-3 text-sm"
+                  >
+                    <span className="flex items-center gap-2">
+                      <span className="font-medium">{m.email}</span>
+                      <Badge variant="muted">{m.provider}</Badge>
+                      <Badge variant={m.status === "connected" ? "success" : m.status === "error" ? "destructive" : "secondary"}>
+                        {m.status === "connected"
+                          ? "sending live"
+                          : m.status === "error"
+                            ? "error"
+                            : "linked · sending gated"}
+                      </Badge>
+                    </span>
+                    <span className="flex items-center gap-2">
+                      {m.status === "gated" && mailboxCaps.data?.deliveryVerified === false ? (
+                        <span className="text-xs text-amber-500">waiting on provider verification</span>
+                      ) : null}
+                      {m.status === "error" && m.lastError ? (
+                        <span className="max-w-xs truncate text-xs text-destructive" title={m.lastError}>
+                          {m.lastError}
+                        </span>
+                      ) : null}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={disconnectMailbox.isPending}
+                        onClick={() => disconnectMailbox.mutate({ id: m.id })}
+                      >
+                        Unlink
+                      </Button>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-3 text-xs text-muted-foreground">No mailbox linked yet.</p>
+            )}
           </CardContent>
         </Card>
 

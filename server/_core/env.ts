@@ -156,6 +156,31 @@ export const env = {
   senderPostalAddress: str("SENDER_POSTAL_ADDRESS"),
   replyIngestSecret: str("REPLY_INGEST_SECRET"),
 
+  // Per-workspace mailboxes ("connect your own email"). Each operator's users link
+  // their own Gmail/Microsoft mailbox via OAuth and outreach goes out from it. The
+  // access/refresh tokens are secrets at rest, so they are encrypted with
+  // MAIL_CREDENTIAL_KEY (32 random bytes, base64). Without that key the connect
+  // action refuses rather than storing a plaintext token.
+  mailCredentialKey: str("MAIL_CREDENTIAL_KEY"),
+  // OAuth apps for the mailbox link. Sending through a stranger's mailbox on a
+  // Google/Microsoft account requires a *verified* app (gmail.send / Mail.Send are
+  // sensitive scopes), which in turn requires the deployed domain - so an app that
+  // is not registered yet is a real gate, and mailbox send stays off until these
+  // are configured. Empty by default: the feature is inert, not faked.
+  gmailOAuthClientId: str("GMAIL_OAUTH_CLIENT_ID"),
+  gmailOAuthClientSecret: str("GMAIL_OAUTH_CLIENT_SECRET"),
+  msOAuthClientId: str("MS_OAUTH_CLIENT_ID"),
+  msOAuthClientSecret: str("MS_OAUTH_CLIENT_SECRET"),
+  // Sending to people who are not users of this app, through a linked mailbox, only
+  // works once Google/Microsoft have reviewed and verified the OAuth app. That is
+  // the operator's external step; this flag is how they tell the software it is
+  // done. Until it is set, a linked mailbox is stored but its send path stays
+  // gated, rather than attempting calls that would fail or trip abuse systems.
+  mailboxDeliveryVerified: bool("MAILBOX_DELIVERY_VERIFIED", false),
+  // How often to pull each connected mailbox for new replies (see services/mailIngest).
+  // Only meaningful once a mailbox is `connected`; a job worker re-arms on this cadence.
+  mailboxPollIntervalMinutes: num("MAILBOX_POLL_INTERVAL_MINUTES", 5),
+
   // Non-email channels. Neither of these is a cold-outreach channel: Telegram only
   // lets a bot write to a person who has opened the chat, and the WhatsApp Cloud
   // API only lets it write inside a 24-hour window that the *user* opened by

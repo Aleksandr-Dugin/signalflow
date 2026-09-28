@@ -1,5 +1,6 @@
 import nodemailer, { type Transporter } from "nodemailer";
 import { env } from "../_core/env";
+import { getUsableMailbox, type UsableMailbox } from "./mailOAuth";
 
 export interface OutboundEmail {
   toName: string;
@@ -13,7 +14,7 @@ export interface OutboundEmail {
 }
 
 export interface SendResult {
-  provider: "smtp" | "mock";
+  provider: "smtp" | "mock" | "mailbox";
   providerMessageId: string;
   delivered: boolean;
   // Mock never actually sends; callers must surface this to the user (audit:
@@ -22,7 +23,7 @@ export interface SendResult {
 }
 
 export interface EmailProvider {
-  readonly name: "smtp" | "mock";
+  readonly name: "smtp" | "mock" | "mailbox";
   send(email: OutboundEmail): Promise<SendResult>;
 }
 
@@ -128,6 +129,122 @@ class MockEmailProvider implements EmailProvider {
 
 export function smtpConfigured(): boolean {
   return Boolean(env.smtpHost);
+}
+
+// ── Sending from a user's own linked mailbox ────────────────────────────────
+function encodeMimeHeader(value: string): string {
+  // RFC 2047 encoded-word for non-ASCII subjects; ASCII passes through.
+  if (/^[\x20-\x7E]*$/.test(value)) return value;
+  return `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`;
+}
+
+function formatAddr(name: string | null | undefined, addr: string): string {
+  const display = name ? `"${name.replace(/["]/g, "")}"` : "";
+  return display ? `${display} <${addr}>` : addr;
+}
+
+/**
+ * Assemble a full RFC 2822 message so Gmail can send it as an opaque blob. This is
+ * where the compliance footer and the RFC 8058 unsubscribe headers get folded into
+ * the message itself — the same guarantees the SMTP path adds, because a message
+ * sent from a personal mailbox still has to be unsubscribable and identified.
+ */
+export function buildRfc2822(email: OutboundEmail, mailbox: UsableMailbox): string {
+  const headers: string[] = [`From: ${formatAddr(mailbox.fromName, mailbox.email)}`];
+  const replyTo = mailbox.replyTo || env.smtpReplyTo;
+  if (replyTo) headers.push(`Reply-To: ${replyTo}`);
+  headers.push(`To: ${formatAddr(email.toName, email.toEmail)}`);
+  headers.push(`Subject: ${encodeMimeHeader(email.subject)}`);
+  headers.push(`Date: ${new Date().toUTCString()}`);
+  if (email.referenceId) headers.push(`X-SignalFlow-Ref: ${email.referenceId}`);
+  const unsub = buildUnsubscribeHeaders(email);
+  if (unsub) {
+    headers.push(`List-Unsubscribe: ${unsub["List-Unsubscribe"]}`);
+    headers.push(`List-Unsubscribe-Post: ${unsub["List-Unsubscribe-Post"]}`);
+  }
+  headers.push("MIME-Version: 1.0", 'Content-Type: text/plain; charset="UTF-8"', "Content-Transfer-Encoding: 7bit");
+  return `${headers.join("\r\n")}\r\n\r\n${buildTextBody(email)}`;
+}
+
+class MailboxEmailProvider implements EmailProvider {
+  readonly name = "mailbox" as const;
+  constructor(private readonly mailbox: UsableMailbox) {}
+
+  async send(email: OutboundEmail): Promise<SendResult> {
+    return this.mailbox.provider === "gmail"
+      ? this.sendGmail(email)
+      : this.sendGraph(email);
+  }
+
+  private async sendGmail(email: OutboundEmail): Promise<SendResult> {
+    const raw = Buffer.from(buildRfc2822(email, this.mailbox), "utf8").toString("base64url");
+    const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.mailbox.accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ raw }),
+    });
+    if (!res.ok) {
+      throw new Error(`Gmail send failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
+    }
+    const json: any = await res.json();
+    return {
+      provider: "mailbox",
+      providerMessageId: String(json?.id ?? `gmail-${Date.now()}`),
+      delivered: true,
+      simulated: false,
+    };
+  }
+
+  private async sendGraph(email: OutboundEmail): Promise<SendResult> {
+    const headers: { name: string; value: string }[] = [];
+    if (email.referenceId) headers.push({ name: "X-SignalFlow-Ref", value: email.referenceId });
+    const unsub = buildUnsubscribeHeaders(email);
+    if (unsub) {
+      headers.push({ name: "List-Unsubscribe", value: unsub["List-Unsubscribe"] });
+      headers.push({ name: "List-Unsubscribe-Post", value: unsub["List-Unsubscribe-Post"] });
+    }
+    const replyTo = this.mailbox.replyTo || env.smtpReplyTo;
+    const body = {
+      message: {
+        subject: email.subject,
+        body: { contentType: "text", content: buildTextBody(email) },
+        toRecipients: [{ emailAddress: { address: email.toEmail, name: email.toName } }],
+        ...(replyTo ? { replyTo: [{ emailAddress: { address: replyTo } }] } : {}),
+        ...(headers.length ? { internetMessageHeaders: headers } : {}),
+      },
+      saveToSentItems: true,
+    };
+    const res = await fetch("https://graph.microsoft.com/v1.0/me/sendMail", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.mailbox.accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      throw new Error(`Microsoft send failed (${res.status}): ${(await res.text()).slice(0, 200)}`);
+    }
+    // Graph's sendMail returns 202 with no id; the reference is our own correlation
+    // handle, so use it rather than invent a provider id we were never given.
+    return {
+      provider: "mailbox",
+      providerMessageId: email.referenceId ? `graph-${email.referenceId}` : `graph-${Date.now()}`,
+      delivered: true,
+      simulated: false,
+    };
+  }
+}
+
+/**
+ * The provider a send should use. A workspace with a connected mailbox wins (its own
+ * address is what the user chose to send from); a gated/linked mailbox throws rather
+ * than silently falling back to the shared server. With no mailbox, this is the
+ * historical global behaviour: real SMTP when configured, honest mock otherwise.
+ */
+export async function resolveEmailProvider(workspaceId?: string | null): Promise<EmailProvider> {
+  if (workspaceId) {
+    const mailbox = await getUsableMailbox(workspaceId);
+    if (mailbox) return new MailboxEmailProvider(mailbox);
+  }
+  return getEmailProvider();
 }
 
 let _provider: EmailProvider | null = null;

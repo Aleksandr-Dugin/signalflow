@@ -42,6 +42,8 @@ import {
 } from "./services/providers";
 import { scoreProspect } from "./services/opportunity";
 import { forBackend } from "./services/groq";
+import { mailCryptoConfigured } from "./services/crypto";
+import { mailboxProviderConfigured } from "./services/mailOAuth";
 import { enrichCandidateWithContact, enrichCandidatesWithContacts } from "./services/contactExtraction";
 import { getEnrichmentProvider, lookupPeople, type EnrichedPerson } from "./services/enrichment";
 import { addressWasForgotten } from "./services/gdpr";
@@ -1275,10 +1277,29 @@ export async function autopilotState(workspaceId: string): Promise<{
 // adminProcedure. Normal users never call these.
 
 // Which integrations are wired up — booleans and names only, never the secret values.
-export function systemStatus() {
+export async function systemStatus() {
   const aiName = getAIProvider().name;
+  const db = getDb();
+  // Linked-mailbox counts come from the live table; the flags come from env so the
+  // operator can see *why* a mailbox is not sending (no key / no app / unverified)
+  // even when zero mailboxes exist yet.
+  let mailbox = { configured: false, deliveryVerified: false, connectedCount: 0, gatedCount: 0 };
+  if (db) {
+    const statusRows = await db
+      .select({ status: schema.workspaceMailboxes.status, n: count() })
+      .from(schema.workspaceMailboxes)
+      .groupBy(schema.workspaceMailboxes.status);
+    const byStatus: Record<string, number> = {};
+    for (const r of statusRows) byStatus[r.status] = Number(r.n);
+    mailbox = {
+      configured: mailCryptoConfigured() && (mailboxProviderConfigured("gmail") || mailboxProviderConfigured("microsoft")),
+      deliveryVerified: env.mailboxDeliveryVerified,
+      connectedCount: byStatus.connected ?? 0,
+      gatedCount: (byStatus.gated ?? 0) + (byStatus.error ?? 0),
+    };
+  }
   return {
-    dbConnected: getDb() !== null,
+    dbConnected: db !== null,
     environment: env.nodeEnv,
     // "live" means a real model (self-hosted OpenAI-compatible server or Groq) will
     // answer; the model name says which, so the UI never labels a local model "Groq".
@@ -1290,6 +1311,7 @@ export function systemStatus() {
     billing: env.billingProvider || (env.plategaMerchantId && env.plategaSecret ? "platega" : "mock"),
     oauth: { google: Boolean(env.googleClientId && env.googleClientSecret), github: Boolean(env.githubClientId && env.githubClientSecret) },
     discoveryIntervalHours: env.discoveryIntervalHours,
+    mailbox,
   };
 }
 

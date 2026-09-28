@@ -31,6 +31,8 @@ import { startJobWorker, stopJobWorker, workerHealth } from "../services/jobs";
 import { mountEspWebhooks } from "./espWebhooks";
 import { mountConversionEndpoints } from "./conversionWebhooks";
 import { mountChannelEndpoints } from "./channelWebhooks";
+import { mountMailboxOAuth } from "./mailboxWebhooks";
+import { startMailboxPoller, stopMailboxPoller } from "../services/mailIngest";
 import { assertSchemaReady } from "./schemaCheck";
 // Side-effect import: registers "reply.followup" and "campaign.discovery" onto
 // the job worker so autonomous AI follow-up and scheduled discovery actually run.
@@ -285,6 +287,11 @@ mountConversionEndpoints(app);
 // verification secret is configured (services/channels.ts).
 mountChannelEndpoints(app);
 
+// "Connect your own mailbox" OAuth consent callback. Mounted as a plain route (not
+// tRPC) because the provider redirects the user's browser here, exactly like the
+// login OAuth callback; the workspace it binds to comes from the signed state.
+mountMailboxOAuth(app);
+
 // ── tRPC ────────────────────────────────────────────────────────────────────
 app.use(
   "/api/trpc",
@@ -326,6 +333,9 @@ async function start() {
       // drizzle/ can be missing columns schema.ts assumes (see docs/database.md).
       void assertSchemaReady();
       startJobWorker();
+      // Periodic pull for linked mailboxes. Inert unless a `connected` mailbox exists,
+      // which requires MAILBOX_DELIVERY_VERIFIED, so an unconfigured deploy does nothing.
+      startMailboxPoller();
     }
   });
 }
@@ -338,6 +348,7 @@ start().catch((err) => {
 function shutdown(signal: string) {
   console.log(`\n${signal} received, shutting down.`);
   stopJobWorker();
+  stopMailboxPoller();
   httpServer.close(() => {
     closeDb().finally(() => process.exit(0));
   });

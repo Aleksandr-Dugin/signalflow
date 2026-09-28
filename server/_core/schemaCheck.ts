@@ -125,6 +125,22 @@ const REQUIRED: ColumnRequirement[] = [
       "`created_at` timestamp DEFAULT (now()), `updated_at` timestamp DEFAULT (now()), " +
       "CONSTRAINT `system_state_id` PRIMARY KEY(`id`));",
   },
+  {
+    // Linked mailboxes. A missing table means no workspace can send from its own
+    // address: resolveEmailProvider() finds no row and outreach falls back to the
+    // shared SMTP/mock rather than crashing — but the operator must still see that the
+    // feature's storage is absent, exactly as channel_identities is reported.
+    table: "workspace_mailboxes",
+    column: "accessTokenCipher",
+    fix:
+      "CREATE TABLE `workspace_mailboxes` (`id` varchar(36) NOT NULL, `workspace_id` varchar(36) NOT NULL, " +
+      "`provider` enum('gmail','microsoft') NOT NULL, `email` varchar(320) NOT NULL, " +
+      "`status` enum('connected','gated','error') NOT NULL DEFAULT 'gated', `access_token_cipher` text, " +
+      "`refresh_token_cipher` text, `access_expires_at` timestamp, `scope` text, `from_name` varchar(200), " +
+      "`reply_to` varchar(320), `last_error` text, `last_inbound_cursor` varchar(191), " +
+      "`created_at` timestamp DEFAULT (now()), `updated_at` timestamp DEFAULT (now()), " +
+      "CONSTRAINT `workspace_mailboxes_id` PRIMARY KEY(`id`));",
+  },
 ];
 
 function parseEnum(columnType: string): string[] {

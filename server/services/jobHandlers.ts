@@ -7,6 +7,7 @@ import { env } from "../_core/env";
 import { enqueueJob, registerJob } from "./jobs";
 import { generatePersonalization, getProspectThread, runDiscovery } from "../db";
 import { makeIdempotencyKey, sendOutreachEmail } from "./outreach";
+import { pollMailbox } from "./mailIngest";
 
 registerJob("reply.followup", async (payload: any, job) => {
   const prospectId = String(payload?.prospectId ?? "");
@@ -68,4 +69,15 @@ registerJob("campaign.discovery", async (payload: any, job) => {
     });
   }
   return outcome;
+});
+
+// Linked-mailbox reply polling. Gmail/Graph give no inbound webhook for a personal
+// mailbox, so new replies are pulled on a timer. The poller started in _core/index.ts
+// enqueues one of these per connected mailbox on the configured cadence; the handler
+// just does the pull. It only ever runs for `connected` mailboxes, which exist solely
+// once the operator has verified the OAuth app, so an unconfigured deployment queues
+// nothing and the timer is a cheap distinct-workspaces query.
+registerJob("mailbox.poll", async (_payload: any, job) => {
+  const ingested = await pollMailbox(job.workspaceId);
+  return { ingested };
 });

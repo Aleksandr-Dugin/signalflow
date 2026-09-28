@@ -20,6 +20,14 @@ import {
 } from "./services/channels";
 import { isProviderConfigured } from "./_core/oauth";
 import { hit } from "./_core/rateLimit";
+import { env } from "./_core/env";
+import {
+  MailboxOAuthError,
+  mailboxProviderConfigured,
+  startMailboxOAuth,
+  type MailboxProvider,
+} from "./services/mailOAuth";
+import { mailCryptoConfigured } from "./services/crypto";
 import {
   createCampaign,
   contactSearchCapabilities,
@@ -326,6 +334,76 @@ export const appRouter = router({
       .mutation(async ({ ctx, input }) => {
         const workspaceId = await requireWorkspace(ctx);
         return { revoked: await revokeChannelIdentity(workspaceId, input.identityId) };
+      }),
+  }),
+
+  // Per-workspace mailboxes ("send from my own address"). The connect button is
+  // deliberately honest: capabilities() reports whether an OAuth app + credential key
+  // exist so the UI never renders an action that would only throw, and connect() still
+  // refuses with a clear reason. Linking a mailbox does not enable sending — that is
+  // gated behind provider verification (see services/mailOAuth + outreach).
+  mailbox: router({
+    capabilities: protectedProcedure.query(() => ({
+      cryptoConfigured: mailCryptoConfigured(),
+      deliveryVerified: env.mailboxDeliveryVerified,
+      providers: {
+        gmail: mailboxProviderConfigured("gmail"),
+        microsoft: mailboxProviderConfigured("microsoft"),
+      },
+    })),
+    connect: protectedProcedure
+      .input(z.object({ provider: z.enum(["gmail", "microsoft"]) }))
+      .mutation(async ({ ctx, input }): Promise<{ url: string }> => {
+        const workspaceId = await requireWorkspace(ctx);
+        try {
+          return { url: startMailboxOAuth(workspaceId, input.provider as MailboxProvider) };
+        } catch (err) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: err instanceof MailboxOAuthError ? err.message : "could not start mailbox linking",
+          });
+        }
+      }),
+    // The workspace's linked mailboxes, minus any token material — status only.
+    status: protectedProcedure.query(async ({ ctx }) => {
+      const workspaceId = await requireWorkspace(ctx);
+      const db = getDb();
+      if (!db) return [];
+      const rows = await db
+        .select({
+          id: schema.workspaceMailboxes.id,
+          provider: schema.workspaceMailboxes.provider,
+          email: schema.workspaceMailboxes.email,
+          status: schema.workspaceMailboxes.status,
+          fromName: schema.workspaceMailboxes.fromName,
+          lastError: schema.workspaceMailboxes.lastError,
+          updatedAt: schema.workspaceMailboxes.updatedAt,
+        })
+        .from(schema.workspaceMailboxes)
+        .where(eq(schema.workspaceMailboxes.workspaceId, workspaceId))
+        .orderBy(schema.workspaceMailboxes.updatedAt);
+      return rows.map((r) => ({
+        ...r,
+        updatedAt: r.updatedAt ? r.updatedAt.toISOString() : null,
+      }));
+    }),
+    // Removing a link must always be possible (the user may want to revoke consent),
+    // so this only deletes the workspace's own row and never grants anything.
+    disconnect: protectedProcedure
+      .input(z.object({ id: z.string() }))
+      .mutation(async ({ ctx, input }) => {
+        const workspaceId = await requireWorkspace(ctx);
+        const db = getDb();
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "no db" });
+        await db
+          .delete(schema.workspaceMailboxes)
+          .where(
+            and(
+              eq(schema.workspaceMailboxes.id, input.id),
+              eq(schema.workspaceMailboxes.workspaceId, workspaceId),
+            ),
+          );
+        return { ok: true };
       }),
   }),
 

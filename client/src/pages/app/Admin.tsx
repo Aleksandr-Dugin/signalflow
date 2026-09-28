@@ -206,6 +206,19 @@ export default function Admin() {
           <StatusChip ok label={`Billing: ${status.data?.billing ?? "mock"}`} />
           <StatusChip ok={Boolean(status.data?.oauth?.google)} label="Google OAuth" />
           <StatusChip ok={Boolean(status.data?.oauth?.github)} label="GitHub OAuth" />
+          {/* Linked mailboxes: only green once one is actually connected (i.e. the
+              OAuth app is verified). A configured-but-gated mailbox is reported with
+              its count so the operator sees linking works while sending does not. */}
+          <StatusChip
+            ok={Boolean(status.data?.mailbox?.connectedCount)}
+            label={
+              status.data?.mailbox?.connectedCount
+                ? `Mailboxes: ${status.data.mailbox.connectedCount} live`
+                : status.data?.mailbox?.gatedCount
+                  ? `Mailboxes: ${status.data.mailbox.gatedCount} gated`
+                  : "Mailboxes: none"
+            }
+          />
           <span className="ml-auto text-xs text-muted-foreground">env: <span className="font-mono">{status.data?.environment}</span></span>
         </CardContent>
       </Card>

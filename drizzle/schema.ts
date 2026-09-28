@@ -130,6 +130,44 @@ export const workspaceMembers = mysqlTable(
   }),
 );
 
+// ── Mailboxes ("connect your own email") ──────────────────────────────────────
+// A per-workspace mailbox a user linked via OAuth. Outreach is sent from the
+// owner's real address, which is the right thing for low-volume 1:1 delivery but
+// puts their reputation on the line - so the send path refuses to run until the
+// deployment's OAuth app is verified (status never leaves "gated" before that).
+// The tokens are secrets at rest and are stored encrypted (services/crypto), never
+// in plaintext; the cipher fields are opaque strings for exactly that reason.
+export const workspaceMailboxes = mysqlTable(
+  "workspace_mailboxes",
+  {
+    id: varchar("id", { length: 36 }).primaryKey(),
+    workspaceId: varchar("workspace_id", { length: 36 })
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    provider: mysqlEnum("provider", ["gmail", "microsoft"]).notNull(),
+    email: varchar("email", { length: 320 }).notNull(),
+    // connected: a verified app delivered usable tokens; gated: linked but the app
+    // is not verified so sending is refused; error: last refresh/send failed.
+    status: mysqlEnum("status", ["connected", "gated", "error"]).notNull().default("gated"),
+    accessTokenCipher: text("access_token_cipher"),
+    refreshTokenCipher: text("refresh_token_cipher"),
+    accessExpiresAt: timestamp("access_expires_at", { mode: "date" }),
+    scope: text("scope"),
+    fromName: varchar("from_name", { length: 200 }),
+    replyTo: varchar("reply_to", { length: 320 }),
+    lastError: text("last_error"),
+    // Watermark for inbound polling, so a reply is ingested once (Gmail history id
+    // or Graph changeKey). Not a secret; a cursor.
+    lastInboundCursor: varchar("last_inbound_cursor", { length: 191 }),
+    createdAt: ts("created_at"),
+    updatedAt: ts("updated_at"),
+  },
+  (t) => ({
+    wsIdx: index("mailbox_workspace_idx").on(t.workspaceId),
+    uniqueMailbox: uniqueIndex("workspace_mailboxes_unique").on(t.workspaceId, t.email),
+  }),
+);
+
 export const profiles = mysqlTable(
   "profiles",
   {

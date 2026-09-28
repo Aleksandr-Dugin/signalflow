@@ -4,7 +4,7 @@ import * as schema from "../../drizzle/schema";
 import { getDb } from "../_core/database";
 import { env } from "../_core/env";
 import { enforceFeature, enforceLimit, monthlyUsageCount, recordUsage } from "./entitlements";
-import { getEmailProvider, type SendResult } from "./email";
+import { resolveEmailProvider, type SendResult } from "./email";
 import { ctaLinksFromConfig, trackCtaLinks } from "./cta";
 import { canonicalDomain } from "./providers";
 
@@ -168,7 +168,8 @@ export async function sendOutreachEmail(
   }
 
   try {
-    const result: SendResult = await getEmailProvider().send({
+    const provider = await resolveEmailProvider(input.workspaceId);
+    const result: SendResult = await provider.send({
       toName,
       toEmail: email,
       subject: input.subject,
