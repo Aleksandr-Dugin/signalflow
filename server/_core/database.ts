@@ -2,6 +2,7 @@ import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
 import mysql from "mysql2/promise";
 import * as schema from "../../drizzle/schema";
 import { env } from "./env";
+import { describeDatabaseUrl, poolConfig } from "./dbConnection";
 
 export type DB = MySql2Database<typeof schema>;
 
@@ -20,10 +21,12 @@ export function getDb(): DB | null {
     return null;
   }
   try {
-    _pool = mysql.createPool(env.databaseUrl);
+    // Options, not the raw URL: TiDB's public endpoints are TLS-only and a
+    // mysql:// string cannot carry that. See dbConnection.ts.
+    _pool = mysql.createPool(poolConfig(env.databaseUrl));
     _db = drizzle(_pool, { mode: "default" });
   } catch (err) {
-    console.error("[db] connection failed, will retry on next call:", err);
+    console.error(`[db] connection failed for ${describeDatabaseUrl(env.databaseUrl)}, will retry on next call:`, err);
     return null; // do not cache the failure
   }
   return _db;

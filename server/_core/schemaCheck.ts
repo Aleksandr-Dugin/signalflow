@@ -11,6 +11,7 @@
 // This is deliberately a *check*, not a migrator: it never mutates the schema.
 import mysql, { type RowDataPacket } from "mysql2/promise";
 import { env } from "./env";
+import { describeDatabaseUrl, poolConfig } from "./dbConnection";
 
 interface ColumnRequirement {
   table: string;
@@ -162,7 +163,7 @@ export async function detectSchemaDrift(): Promise<SchemaDrift | null> {
   if (!env.databaseUrl) return null;
   let conn: mysql.Connection | null = null;
   try {
-    conn = await mysql.createConnection(env.databaseUrl);
+    conn = await mysql.createConnection(poolConfig(env.databaseUrl));
     const [dbRows] = await conn.query<DbNameRow[]>("SELECT DATABASE() AS db");
     const schemaName = dbRows[0]?.db;
     if (!schemaName) return null;
@@ -209,7 +210,18 @@ export async function detectSchemaDrift(): Promise<SchemaDrift | null> {
     }
     return { missing, unknownTables };
   } catch (err) {
-    console.error("[schema] drift check could not run (not fatal):", err);
+    // Named rather than dumped, because the two most common causes look like each
+    // other: a server that demands TLS answers "Access denied" to a plain client,
+    // and an operator reads that as "wrong password".
+    console.error(
+      `[schema] drift check could not run against ${describeDatabaseUrl(env.databaseUrl)} (not fatal):`,
+      err,
+    );
+    console.error(
+      "  If the message above mentions Access denied for a host you know is correct, " +
+        "check whether the server requires TLS (TiDB Cloud public endpoints do) and set " +
+        "DATABASE_SSL=true or DATABASE_CA_PATH before retrying.",
+    );
     return null;
   } finally {
     if (conn) await conn.end().catch(() => {});

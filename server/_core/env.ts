@@ -30,6 +30,21 @@ export const env = {
   trustProxy: bool("TRUST_PROXY", false),
 
   databaseUrl: str("DATABASE_URL"),
+  // "" = decide from the host (TiDB Cloud's public endpoints are TLS-only and say
+  // so with an error that looks like a bad password). "true" forces TLS on a plain
+  // MySQL; "false" forces it off for a server that reaches TiDB inside a VPC.
+  databaseSsl: str("DATABASE_SSL"),
+  // PEM file for a private CA. Leave unset for public providers: their certificates
+  // chain to roots Node already trusts, and pinning a downloaded leaf is how a
+  // deployment ends up unable to rotate.
+  databaseCaPath: str("DATABASE_CA_PATH"),
+  // Debugging escape hatch. Refused outright in production — see
+  // assertRuntimeConfig() — because an unverified certificate is a connection an
+  // on-path attacker can terminate, which is not the thing TLS is for.
+  databaseSslSkipVerify: bool("DATABASE_SSL_SKIP_VERIFY", false),
+  // TiDB Starter caps concurrent connections at 400 and charges RUs per query, so
+  // the pool is sized rather than left at the driver default of 10.
+  databasePoolSize: num("DATABASE_POOL_SIZE", 10),
   jwtSecret: str("JWT_SECRET"),
 
   // Comma-separated allow-list of emails that are auto-promoted to the
@@ -58,11 +73,48 @@ export const env = {
   // 0 turns automatic contact discovery off; manual contacts still work.
   maxContactEnrichments: num("MAX_CONTACT_ENRICHMENTS", 10),
 
+  // Which discovery engine to use. Empty keeps the historical contract: a
+  // ScrapeGraph key means live companies, and without one the app returns clearly
+  // labelled demo data. `open` opts into the free, keyless sources instead
+  // (Hacker News + OpenStreetMap, services/openDiscovery.ts) — an explicit choice
+  // because it means sending this deployment's traffic to third-party public APIs,
+  // which is the operator's decision and not a default to inherit.
+  discoveryProvider: str("DISCOVERY_PROVIDER"),
+  openDiscoverySources: str("OPEN_DISCOVERY_SOURCES", "hn,osm"),
+  // Hard ceiling on candidates one free run may collect, and how many of them get
+  // their own homepage read for a description. Free still means polite: these are
+  // public APIs that ask callers not to hammer them.
+  openDiscoveryLimit: num("OPEN_DISCOVERY_RESULT_LIMIT", 25),
+  openDiscoveryHomepageReads: num("OPEN_DISCOVERY_HOMEPAGE_READS", 10),
+  politenessMs: num("DISCOVERY_POLITENESS_MS", 400),
+  httpTimeoutMs: num("HTTP_TIMEOUT_MS", 12_000),
+  httpMaxBytes: num("HTTP_MAX_BYTES", 1_000_000),
+  // Overpass is a query engine, not a key-value lookup: a city-wide tag query can
+  // legitimately take 10-20 s (live: 5.3 s for Berlin dentists). Kept well under the
+  // worker's tick budget, because these requests run inline and a wedged source must
+  // not make the whole queue look stalled.
+  overpassTimeoutMs: num("OVERPASS_TIMEOUT_MS", 20_000),
+  // Ceiling for one OpenStreetMap lookup across every endpoint and retry. The worker
+  // calls its handler inline and reports a stale heartbeat after a minute of silence,
+  // so a free source that is having a bad afternoon gets a budget, not a blank cheque.
+  overpassBudgetMs: num("OVERPASS_BUDGET_MS", 45_000),
+  // Tried in order. The main instance answers 504 "server too busy" under load — a
+  // live run here hit it twice in a row — and community mirrors exist precisely for
+  // that, so one endpoint being saturated is not a reason to report no companies.
+  // overpass.openstreetmap.fr is deliberately absent: it answers 403 unless the
+  // usage is white-listed.
+  overpassEndpoints: str(
+    "OVERPASS_ENDPOINTS",
+    "https://overpass-api.de/api/interpreter,https://overpass.kumi.systems/api/interpreter,https://overpass.private.coffee/api/interpreter,https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+  ),
+
   // Paid enrichment (docs/ai-agents.md: the only compliant route to phones and
   // social profiles). Deliberately empty by default: the selector must name a
   // provider, so having a key is never enough to start spending money. Setting
   // this to `hunter` or `apollo` plus its key turns a manual lookup into an
-  // automated one; anything else keeps the pipeline on free page scraping.
+  // automated one; without it the only contact route left is reading the company's
+  // own pages, which needs a discovery provider that can fetch them (SGAI_API_KEY,
+  // or DISCOVERY_PROVIDER=open).
   enrichmentProvider: str("ENRICHMENT_PROVIDER"),
   hunterApiKey: str("HUNTER_API_KEY"),
   apolloApiKey: str("APOLLO_API_KEY"),
@@ -178,6 +230,11 @@ export function assertRuntimeConfig(): void {
   }
   if (env.isProd) {
     if (!env.databaseUrl) problems.push("DATABASE_URL is required in production.");
+    if (env.databaseSslSkipVerify) {
+      problems.push(
+        "DATABASE_SSL_SKIP_VERIFY is on. In production that means the database connection is encrypted but its server is not identified, which is the exact failure TLS exists to prevent.",
+      );
+    }
     if (env.jwtSecret === "change-me-to-a-long-random-string-at-least-32-chars") {
       problems.push("JWT_SECRET is still the example value.");
     }
