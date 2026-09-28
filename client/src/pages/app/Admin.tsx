@@ -188,7 +188,16 @@ export default function Admin() {
           <span className="mr-2 inline-flex items-center gap-1.5 text-sm font-medium"><Activity className="h-4 w-4 text-primary" /> Integrations</span>
           <StatusChip ok={Boolean(status.data?.dbConnected)} label={status.data?.dbConnected ? "Database" : "No database"} />
           <StatusChip ok={status.data?.ai === "groq"} label={status.data?.ai === "groq" ? "Groq AI" : "AI: mock"} />
-          <StatusChip ok={status.data?.discovery === "scrapegraph-live"} label="ScrapeGraph" />
+          <StatusChip
+            ok={Boolean(status.data?.discovery) && status.data?.discovery !== "mock"}
+            label={
+              status.data?.discovery === "scrapegraph"
+                ? "Discovery: ScrapeGraph"
+                : status.data?.discovery === "open"
+                  ? "Discovery: open data (free)"
+                  : "Discovery: demo data"
+            }
+          />
           <StatusChip ok={Boolean(status.data?.smtp)} label="SMTP" />
           <StatusChip ok={Boolean(status.data?.replyWebhook)} label="Reply webhook" />
           <StatusChip ok label={`Billing: ${status.data?.billing ?? "mock"}`} />

@@ -212,6 +212,9 @@ describe("contactPageUrls", () => {
     expect(urls).toContain("https://acme-corp.com/team");
     expect(urls.length).toBeGreaterThan(3);
     expect(urls.every((u) => u.startsWith("https://acme-corp.com/"))).toBe(true);
+    // Last, not first: the front page is the fallback when the named paths 404,
+    // and it is where a footer address lives.
+    expect(urls.at(-1)).toBe("https://acme-corp.com/");
   });
 
   it("refuses to build urls for a junk domain", () => {
@@ -294,6 +297,20 @@ describe("enrichCandidateWithContact", () => {
     expect(asked).toContain("https://acme-corp.com/team");
     // …and it stopped there instead of finishing the list.
     expect(asked.length).toBeLessThan(6);
+  });
+
+  it("stops walking a site that answers every path with the same page", async () => {
+    // Live run against a real single-page site: /contact, /contact-us, /team, /about,
+    // /about-us and /company all returned HTTP 200 with one identical 5249-character
+    // body. Six requests, one page, and on a paid scraper six times the spend.
+    const asked: string[] = [];
+    const sameBody = "Acme Corp — we migrate databases. " + "x".repeat(200);
+    const out = await enrichCandidateWithContact(async (urls) => {
+      asked.push(...urls);
+      return [{ url: urls[0]!, text: sameBody }];
+    }, candidate());
+    expect(out.contact).toBeUndefined();
+    expect(asked).toEqual(["https://acme-corp.com/contact", "https://acme-corp.com/contact-us"]);
   });
 
   it("keeps what the earlier pages gave when a later page blows up", async () => {

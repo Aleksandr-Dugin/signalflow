@@ -11,6 +11,7 @@ import {
 } from "./groq";
 import { icpSchema } from "./groq";
 import type { PageFetcher, ScrapedPage } from "./contactExtraction";
+import { OpenWebDiscovery } from "./openDiscovery";
 import { demoProspects, DEMO_DISCLOSURE } from "../../shared/demo";
 
 export type QualificationResult = z.infer<typeof qualificationSchema>;
@@ -34,14 +35,45 @@ export interface CompanyCandidate {
 }
 
 // ── URL / domain hygiene ─────────────────────────────────────────────────────
+/**
+ * Addresses that are never a company's public website. This function is the guard
+ * in front of every fetch the system makes at a URL a page or a source supplied, so
+ * the interesting cases are the ones that look like nothing: the cloud metadata
+ * endpoint at 169.254.169.254, the carrier-grade range a private cluster hides in,
+ * and the numeric spellings of 127.0.0.1 that a naive prefix check waves through.
+ */
+export function isPrivateAddress(input: string): boolean {
+  const h = input.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "::" || h === "::1") return true;
+  if (/^f[cd][0-9a-f]{2}:/.test(h) || /^fe80:/.test(h)) return true; // unique-local, link-local
+  if (h.startsWith("::ffff:")) return isPrivateAddress(h.slice(7)); // IPv4-mapped IPv6
+  const dotted = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (dotted) {
+    const [a, b, c, d] = dotted.slice(1).map(Number);
+    if ([a, b, c, d].some((v) => v > 255)) return true; // malformed is not fetchable either
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 169 && b === 254) return true; // link-local, incl. cloud instance metadata
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && (b === 168 || b === 0)) return true;
+    if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking, routes like private
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT: where private clusters live
+    if (a >= 224) return true; // multicast and reserved
+    return false;
+  }
+  // `http://2130706433/` and `http://0x7f.1/` are 127.0.0.1 in other spellings, and a
+  // hostname with no dot cannot be a public site from inside this system's point of view.
+  if (/^\d+$/.test(h) || /^0[xX][0-9a-f]+$/.test(h)) return true;
+  if (!h.includes(".") && h !== "localhost") return true;
+  return false;
+}
+
 export function canonicalizeUrl(input: string): string | null {
   try {
     const url = new URL(input);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    if (url.hostname === "localhost" || url.hostname.endsWith(".local")) return null;
-    const ipPrivate =
-      /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.)/.test(url.hostname);
-    if (ipPrivate) return null;
+    const hostname = url.hostname;
+    if (hostname === "localhost" || hostname.endsWith(".local") || hostname.endsWith(".internal")) return null;
+    if (isPrivateAddress(hostname)) return null;
     return url.toString();
   } catch {
     return null;
@@ -60,6 +92,7 @@ export function canonicalDomain(input: string): string {
 }
 
 const NON_COMPANY_DOMAINS = [
+  // Profiles and aggregators: a page here describes a company, it is not one.
   "linkedin.com",
   "crunchbase.com",
   "indeed.com",
@@ -73,6 +106,19 @@ const NON_COMPANY_DOMAINS = [
   "reddit.com",
   "news.ycombinator.com",
   "medium.com",
+  // Hosting: the page belongs to the platform, so the domain would name the wrong
+  // company and no contact could ever be found on it. Live runs turned up github.com
+  // and apps.apple.com as "companies" once the query started matching announcements.
+  "github.com",
+  "gitlab.com",
+  "bitbucket.org",
+  "sourceforge.net",
+  "apps.apple.com",
+  "play.google.com",
+  "vercel.app",
+  "netlify.app",
+  "herokuapp.com",
+  "railway.app",
 ];
 
 export function isLikelyCompanyResult(url: string): boolean {
@@ -284,7 +330,7 @@ export interface DiscoverInput {
 }
 
 export interface LeadDiscoveryProvider {
-  readonly name: "scrapegraph" | "mock";
+  readonly name: "scrapegraph" | "open" | "mock";
   discoverProspects(input: DiscoverInput): Promise<CompanyCandidate[]>;
   /**
    * Raw public-page text, used by the contact-extraction second pass
@@ -407,12 +453,41 @@ class MockDiscovery implements LeadDiscoveryProvider {
 }
 
 let _discovery: LeadDiscoveryProvider | null = null;
+
+/**
+ * Which engine a discovery run will use.
+ *
+ * The default is unchanged from before the free sources existed — live only when a
+ * ScrapeGraph key is present, demo data otherwise — because reaching out to third
+ * party public APIs is a decision the operator makes, not a side effect of pulling
+ * the code. `DISCOVERY_PROVIDER=open` makes that decision explicitly.
+ *
+ * A named-but-unavailable choice falls back to demo data and says so once: the
+ * alternative is a campaign that quietly mails fictional companies.
+ */
 export function getDiscoveryProvider(): LeadDiscoveryProvider {
+  const choice = env.discoveryProvider.trim().toLowerCase();
+  if (choice === "mock") return new MockDiscovery();
+  if (choice === "open") {
+    _discovery = _discovery instanceof OpenWebDiscovery ? _discovery : new OpenWebDiscovery();
+    return _discovery;
+  }
+  if (choice === "scrapegraph" && !env.sgaiApiKey) {
+    console.warn(
+      "[discovery] DISCOVERY_PROVIDER=scrapegraph but no SGAI_API_KEY is set; falling back to labelled demo data instead of pretending discovery is live.",
+    );
+    return new MockDiscovery();
+  }
   if (env.sgaiApiKey) {
     _discovery = _discovery instanceof ScrapeGraphDiscovery ? _discovery : new ScrapeGraphDiscovery();
     return _discovery;
   }
   return new MockDiscovery();
+}
+
+/** What the health check and the Admin page show: the engine, and whether it is real. */
+export function discoveryMode(): "scrapegraph" | "open" | "mock" {
+  return getDiscoveryProvider().name;
 }
 
 export { GroqProvider };

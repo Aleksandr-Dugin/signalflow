@@ -67,7 +67,8 @@ before you believe the SPF/DKIM/DMARC checkmarks.
 | Variable | Without it |
 | --- | --- |
 | `GROQ_API_KEY` | Drafts, qualification and reply classification fall back to mock text. Nothing is sendable. |
-| `SGAI_API_KEY` | Discovery returns demo companies instead of real ones. |
+| `SGAI_API_KEY` | One way to get real companies. Without it (and without `DISCOVERY_PROVIDER=open`) discovery returns demo companies instead of real ones. |
+| `DISCOVERY_PROVIDER=open` | The free, keyless alternative: real companies from Hacker News (tech ICPs) and OpenStreetMap (local ICPs, including published phone numbers), and it reads their own pages for an address with no scraper service. See section 3a. |
 | `MAX_CONTACT_ENRICHMENTS` | Budget for the second discovery pass over each company's `/contact|/team|/about`. `0` = manual contacts only. |
 | `ENRICHMENT_PROVIDER` + `HUNTER_API_KEY` / `APOLLO_API_KEY` | The only compliant route to a named person, phone and licensed profile when the company's own pages name nobody. Empty = nothing is ever bought. |
 | `ENRICHMENT_AUTO_DISCOVER` | Whether an unattended run may spend money. Off means the autopilot never buys anything — leave it off until you have watched the credit meter on manual lookups. |
@@ -78,6 +79,53 @@ before you believe the SPF/DKIM/DMARC checkmarks.
 This is a decision, not a configuration: buying contact data costs money per person and
 puts a name in front of an automated sender. Decide deliberately, and leave
 `ENRICHMENT_AUTO_DISCOVER=false` for the first campaign.
+
+## 3a. What costs nothing, and what nothing free can cover
+
+Checked September 2026. Quotas move; re-read the provider's own page before relying on
+a number here. The point of the list is that the *finding* leg is free and the *sending*
+leg is not, which is the opposite of what most launch budgets assume.
+
+| Leg | Free option | What it actually buys |
+| --- | --- | --- |
+| Database | TiDB Cloud Starter (this repo's `DATABASE_URL`) | 5 GiB row + 5 GiB columnar storage and 50M request units per month, per instance, no card. Public endpoint is TLS-only, caps at 400 connections, and drops a connection that goes quiet (about 340 s on the AWS gateway), which is why the pool idles out in 60 s rather than trusting the server. |
+| Finding companies | `DISCOVERY_PROVIDER=open` | Real companies from two public datasets, no key and no account: **Show HN** posts for tech ICPs (deliberately not `tags=story`, which returns journalism *about* a topic rather than the companies making it) and OpenStreetMap for local ones. `services/openDiscovery.ts`. Covers two families of ICP and returns nothing for others, on purpose. |
+| Reading their pages for an address | same provider, no scraper service | The `/contact\|/team\|/about` pass, then the homepage, is a plain HTTPS GET plus string work. Nothing is invented: an address is returned only if it was printed on the page. A contact form rendered entirely by JavaScript stays invisible — see the measured result below, because that is the common case. |
+| AI writing and classification | Groq free tier (`GROQ_API_KEY`) | Free at realistic volume and no card. Without a key the product still works but the writing leg is not AI: qualification, drafts and reply classification fall back to keyword rules and labelled demo text. The key has to be pasted into `.env` — nothing in the repository contains one. |
+| Phone numbers | OpenStreetMap where a business published one | Only as a *claim in the evidence*: a prospect is keyed by its company domain, so a mapped business with a phone and no website cannot be carried forward, and the engine logs how many it had to leave behind. Beyond that, a paid lookup — no free source supplies direct-dial numbers for decision makers. |
+| Named decision-maker lookup | Hunter free plan (about 50 credits a month, no card); Apollo has a free plan too, with numbers that change quarterly | Enough to try the provider path before paying. `ENRICHMENT_AUTO_DISCOVER` stays off, so an unattended run never spends a credit. |
+| Booking meetings | Calendly free | One event type and one scheduling link, which is the whole requirement for the `meeting_booked` leg. |
+| Payment evidence | Stripe test mode | The rehearsal's `won` transition, at no cost. Live billing is the operator's separate decision (Platega), and `BILLING_PROVIDER=mock` is refused in production. |
+| Chat channel | Telegram Bot API via @BotFather | Free, no business verification, no template approval. WhatsApp is not free in the way that matters: it needs a Meta business-verified app. |
+| Uptime and queue alerts | any free HTTP pinger | Point it at `GET /api/health` and alert the log on `[jobs] queue degraded`. There is no alerting service wired into the code; these two are the whole mechanism. |
+
+**What a live run of the free path actually produced** (September 2026, no keys, this
+machine). Four `Show HN` SaaS companies with correct names read from their own
+`og:site_name`; three Berlin dental practices from OpenStreetMap, two with a phone and a
+website; and **zero published email addresses out of eight companies**. Three things
+follow from that, and the runbook should say them rather than the code hiding them:
+
+- The *companies* are real and reachable by domain. The *address* is still the scarce
+  thing, because small businesses publish a form, not a `mailto:`. Free discovery solves
+  "who should I talk to", not "what do I write to". A Hunter free plan (~50 credits a
+  month) or one typed contact is how the gap gets closed.
+- One mapped domain had changed hands since OpenStreetMap recorded it and now serves an
+  online casino. Reading the homepage is what caught it: a mapped name that appears
+  nowhere on the site it points to is dropped, with the reason logged.
+- Public Overpass instances are shared infrastructure. The same valid query returned 12
+  rows in 5.3 s on one run and `504 too busy` on the next two, from the same network, so
+  the engine walks a mirror list twice inside `OVERPASS_BUDGET_MS` and reports
+  "the source is busy" as distinct from "this city has none". Expect OpenStreetMap to be
+  intermittently empty; Hacker News does not do that.
+
+**The one leg with no free option: sending.** A domain that can carry mail costs money
+(a second-level domain at cost is roughly 10 USD a year, and the mailbox on it should be
+a paid one), and the free tiers of the friendly-looking API providers are not a path
+for cold outreach: Brevo's anti-spam policy is zero-tolerance on unsolicited mail and
+Mailjet, Resend and Postmark draw the same line in their acceptable-use terms. A free
+tier used for cold email ends in a suspended account and a domain that has been reported
+to blocklists, which is a worse outcome than paying 10 USD. Buy the domain, authenticate
+it with SPF, DKIM and DMARC, and send slowly from it.
 
 ## 4. Webhooks — point the providers at the deployed origin
 
@@ -147,7 +195,8 @@ also the moment the docs get corrected.
 1. Platform autonomy **paused** (Admin → pull the switch).
 2. Profile + ICP in the app (`/app/onboarding`), one campaign with the ICP linked.
 3. **Run discovery**. Expect real companies with evidence-backed reasons. With no
-   `SGAI_API_KEY` this returns demo data and the rehearsal proves nothing.
+   `SGAI_API_KEY` and no `DISCOVERY_PROVIDER=open` this returns demo data and the
+   rehearsal proves nothing.
 4. Open a prospect. If the second pass found nobody, add the contact by hand (a real
    address you are allowed to mail — your own mailbox is the safest choice) and confirm
    the MX check accepts it.

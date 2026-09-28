@@ -32,6 +32,7 @@ import {
 } from "./services/entitlements";
 import {
   dedupeCandidates,
+  discoveryMode,
   getAIProvider,
   getDiscoveryProvider,
   type CompanyCandidate,
@@ -443,7 +444,7 @@ export async function runDiscovery(workspaceId: string, campaignId: string): Pro
   const discovery = getDiscoveryProvider();
   const ai = getAIProvider();
   const paid = ai.name === "groq";
-  const origin = discovery.name === "scrapegraph" ? "live" : "demo";
+  const origin = discovery.name === "mock" ? "demo" : "live";
 
   const discovered = dedupeCandidates(
     await discovery.discoverProspects({
@@ -883,14 +884,14 @@ export async function enrichProspectContact(
 
   const discovery = getDiscoveryProvider();
   const wantPaid = opts.paid === true;
-  if (discovery.name !== "scrapegraph" && !wantPaid) {
+  if (discovery.name === "mock" && !wantPaid) {
     throw new Error(
-      "No contact search available. Set SGAI_API_KEY to read their own pages, or ENRICHMENT_PROVIDER to buy a lookup.",
+      "No contact search available. Set DISCOVERY_PROVIDER=open (free, reads their own pages), SGAI_API_KEY, or ENRICHMENT_PROVIDER to buy a lookup.",
     );
   }
 
   let found: ContactInput | null = null;
-  if (discovery.name === "scrapegraph") {
+  if (discovery.name !== "mock") {
     const aiPaid = getAIProvider().name === "groq";
     await ensureAiBudget(workspaceId, aiPaid, 1);
     const enriched = await enrichCandidateWithContact((urls) => discovery.fetchPages(urls), {
@@ -933,7 +934,7 @@ export async function enrichProspectContact(
  */
 export function contactSearchCapabilities(): { pages: boolean; enrichment: string | null } {
   return {
-    pages: getDiscoveryProvider().name === "scrapegraph",
+    pages: getDiscoveryProvider().name !== "mock",
     enrichment: getEnrichmentProvider()?.name ?? null,
   };
 }
@@ -1278,7 +1279,7 @@ export function systemStatus() {
     dbConnected: getDb() !== null,
     environment: env.nodeEnv,
     ai: env.groqApiKey ? "groq" : "mock",
-    discovery: env.sgaiApiKey ? "scrapegraph-live" : "mock",
+    discovery: discoveryMode(),
     smtp: Boolean(env.smtpHost),
     replyWebhook: Boolean(env.replyIngestSecret),
     billing: env.billingProvider || (env.plategaMerchantId && env.plategaSecret ? "platega" : "mock"),

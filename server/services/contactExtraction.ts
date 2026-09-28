@@ -330,6 +330,10 @@ export function contactPageUrls(domain: string): string[] {
     const url = canonicalizeUrl(new URL(path, root).toString());
     if (url) urls.push(url);
   }
+  // The homepage last: most small companies put `hello@` in a footer that appears on
+  // every page, and a live run of the free path walked six invented paths on a site
+  // whose only published address was on its own front page.
+  urls.push(root);
   return urls;
 }
 
@@ -353,10 +357,24 @@ export async function enrichCandidateWithContact(
   const urls = contactPageUrls(candidate.domain);
 
   const pages: ScrapedPage[] = [];
+  const seenBodies = new Set<string>();
   for (const url of urls) {
+    let catchAllSite = false;
     try {
       const fetched = (await fetchPages([url])) ?? [];
-      pages.push(...fetched.filter((p) => typeof p?.text === "string" && p.text.length > 0));
+      for (const page of fetched) {
+        if (typeof page?.text !== "string" || page.text.length === 0) continue;
+        // A single-page app, or a site that answers every path with HTTP 200 and the
+        // same body, is one page pretending to be seven. Live run: six paths, six
+        // identical 5249-character bodies. Read it once and stop paying for it.
+        if (seenBodies.has(page.text)) {
+          console.debug?.(`[contacts] ${candidate.domain} answers every path with the same page; stopping the walk`);
+          catchAllSite = true;
+          break;
+        }
+        seenBodies.add(page.text);
+        pages.push(page);
+      }
     } catch (err) {
       // A dead scraper, a 429, a site behind Cloudflare: degrade to "nothing
       // found" and keep whatever the earlier pages already gave us.
@@ -366,6 +384,7 @@ export async function enrichCandidateWithContact(
       );
       break;
     }
+    if (catchAllSite) break;
     const best = pickBestContact(pages, candidate.domain);
     if (best && isStrongContact(best)) return attachContact(candidate, best);
   }

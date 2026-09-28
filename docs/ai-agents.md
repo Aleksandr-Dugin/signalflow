@@ -103,13 +103,79 @@ Note the asymmetry with the table above: the re-enqueue does **not** consult
 switch has never applied to it), but the master switch does stop it, because the
 worker refuses to claim any job while autonomy is paused.
 
+## Where the companies come from: three engines, and what each may say
+
+[server/services/providers.ts](../server/services/providers.ts) `getDiscoveryProvider()`
+picks one, and the answer is a decision the operator makes rather than a default that
+follows from having a key:
+
+| `DISCOVERY_PROVIDER` | Needs | Returns | `origin` on the row |
+| --- | --- | --- | --- |
+| unset (default) | `SGAI_API_KEY` for anything real | live companies when the key is present; clearly labelled fictional demo companies when it is not | `live` / `demo` |
+| `scrapegraph` | `SGAI_API_KEY`, and it refuses to pretend without one (falls back to demo data and logs why) | search-engine results, each page read by ScrapeGraph's extractor | `live` |
+| `open` | nothing: no key, no account, no card | companies from two public datasets, described only by their own words | `live` |
+
+The free engine is [server/services/openDiscovery.ts](../server/services/openDiscovery.ts).
+It is deliberately narrow, because a lead source that guesses is worse than one that
+returns nothing:
+
+- `hn` searches **Show HN** posts from the past year, which is where the people building
+  a product announce it. The plain `tags=story` search was tried against the live API and
+  returned `nytimes.com` and `lemonde.fr` for "B2B SaaS" — journalism *about* a topic is
+  not a company selling one. A post with no company behind it (a discussion link, a job
+  thread, a repo on a code-hosting domain) is filtered out by `isLikelyCompanyResult`, so
+  the source URL of a candidate is the company's own site and the evidence names the HN
+  item it came from.
+  A headline is a sentence written to be clicked ("I made a free list of 100 places…"),
+  so it is not used as the company's name: `brandFromTitle` keeps it only when it reads
+  like a name, and the homepage's own `og:site_name` — or its JSON-LD organisation name —
+  wins whenever the site states one.
+- `osm` asks OpenStreetMap's Overpass API for businesses of a *recognised* category inside
+  an administrative area. An industry with no matching tag contributes nothing rather than
+  borrowing a nearby one, and a geography like "US" or "Global" contributes nothing because
+  the query needs a place, not a market. Where a business has published a phone number in
+  its map entry, that is recorded as evidence — but it cannot by itself make a prospect, be-
+  cause a candidate is identified by its company domain, and the engine logs how many
+  phone-only entries it had to leave behind rather than discarding them silently.
+  Public Overpass instances are shared infrastructure and answer `504 too busy` under load;
+  the lookup walks `OVERPASS_ENDPOINTS` twice inside `OVERPASS_BUDGET_MS` and says so when
+  it gives up, because "the source is busy" and "this city has none" are different facts.
+- Both then read the company's **homepage** (its root, never the deep link a source pointed
+  at) for a title and a meta description, so a free candidate arrives with something for
+  qualification to work on. That read is also the last honest check available: a mapped
+  business whose name appears nowhere on the domain the map recorded is dropped with the
+  reason logged — one live run caught a dental practice's domain serving an online casino,
+  because the domain had changed hands since it was mapped. Nothing in this engine uses a
+  language model on purpose: a model asked to describe a company it has never seen produces
+  a confident paragraph about the wrong business.
+
+The same engine also serves the second pass below: with `DISCOVERY_PROVIDER=open` the
+`/contact|/team|/about` reads are plain HTTPS GETs, so automatic contact discovery costs
+nothing and needs no scraper service. What it cannot see is anything a page renders with
+JavaScript, and that limit is stated rather than hidden.
+
+Every URL this code fetches, from any source, goes through `canonicalizeUrl` first: no
+scheme other than http(s), and no private, loopback, link-local (the cloud metadata
+endpoint at `169.254.169.254`), CGNAT or reserved address, in any of the numeric spellings
+that a naive prefix check waves through. A scraped page that prints
+`https://team/our-people` must not turn this deployment into an internal network probe.
+
 ## Contact discovery: the second pass over the company's own pages
 
 Search results describe companies; they rarely name a human. So after discovery
 returns candidates that have no contact, `runDiscovery` (`server/db.ts`) makes a
-second pass — `/contact`, `/contact-us`, `/team`, `/about`, `/about-us`,
-`/company` — through `server/services/contactExtraction.ts`. Without it the
+second pass — `/contact`, `/contact-us`, `/team`, `/about`, `/about-us`, `/company`,
+and the homepage last — through `server/services/contactExtraction.ts`. Without it the
 pipeline produced prospects that could be scored but never written to.
+
+Measured on a live run of eight real companies found with no key and no money: **zero
+published addresses**. Two findings came out of that and both are now code, not hope. A
+single-page site answers every one of those paths with HTTP 200 and one identical body
+(six requests, one page, six times the scraper spend), so the walk stops the second it
+sees a repeated page. And most small companies publish a *form*, not a `mailto:` — which
+means this leg is the one the free stack genuinely cannot cover: a Hunter free plan or one
+typed contact closes it, and "we found the company but not its address" is the honest
+output when neither is configured.
 
 The rules that make this safe to run unattended:
 

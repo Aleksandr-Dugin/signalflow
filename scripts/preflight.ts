@@ -15,7 +15,9 @@
 // The order of operations around this script is docs/launch.md.
 import { promises as dns } from "node:dns";
 import { env } from "../server/_core/env";
+import { describeDatabaseUrl } from "../server/_core/dbConnection";
 import { detectSchemaDrift } from "../server/_core/schemaCheck";
+import { discoveryMode } from "../server/services/providers";
 import { CONTROLLER, legalIsUnfiled } from "../shared/legal";
 
 type Grade = "ok" | "warn" | "fail";
@@ -80,10 +82,14 @@ async function checkDatabase(): Promise<void> {
     record("fail", "database", "DATABASE_URL is unset — the server boots and stores nothing.");
     return;
   }
-  const masked = env.databaseUrl.replace(/\/\/[^@/]+@/, "//***@");
+  const masked = describeDatabaseUrl(env.databaseUrl);
   const drift = await detectSchemaDrift();
   if (drift === null) {
-    record("warn", "database", `Could not read the schema at ${masked} — wrong host, credentials or TLS?`);
+    record(
+      "warn",
+      "database",
+      `Could not read the schema at ${masked} — wrong host, credentials, or TLS is required and not being offered (TiDB Cloud public endpoints are; DATABASE_SSL/DATABASE_CA_PATH control this).`,
+    );
     return;
   }
   if (drift.missing.length) {
@@ -190,12 +196,40 @@ function checkPipeline(): void {
     record("ok", "AI", `GROQ_API_KEY set (model ${env.groqModel}).`);
   }
 
-  if (!env.sgaiApiKey) {
-    record("warn", "discovery", "SGAI_API_KEY unset — discovery returns demo companies, not real leads.");
-  } else if (env.maxContactEnrichments <= 0) {
-    record("warn", "discovery", `SGAI_API_KEY set but MAX_CONTACT_ENRICHMENTS=${env.maxContactEnrichments}: companies are found, but nobody's address is extracted, so every prospect needs a manual contact.`);
+  const engine = discoveryMode();
+  if (engine === "open") {
+    record(
+      "ok",
+      "discovery",
+      `Free keyless discovery is on: real companies from public sources (${env.openDiscoverySources}), capped at ${env.openDiscoveryLimit} candidates and ${env.openDiscoveryHomepageReads} homepage reads per run.`,
+    );
+    record(
+      "warn",
+      "discovery",
+      "The free sources cover two ICPs: startups that announce themselves on Hacker News, and businesses mapped in OpenStreetMap under a recognised category. A campaign outside those returns nothing rather than something invented, which is the reason to trust what it does return.",
+    );
+    if (env.maxContactEnrichments <= 0) {
+      record("warn", "discovery", `Companies are found, but MAX_CONTACT_ENRICHMENTS=${env.maxContactEnrichments} stops the pass over their own pages, so every prospect needs a manual contact.`);
+    }
+    if (env.openDiscoverySources.includes("osm")) {
+      record(
+        "warn",
+        "discovery",
+        `OpenStreetMap runs on shared public servers that answer 504 when busy; one lookup gets ${env.overpassBudgetMs}ms across ${env.overpassEndpoints.split(",").length} endpoints before it is reported as unavailable. Expect an empty result sometimes when the city is not empty.`,
+      );
+    }
+  } else if (engine === "scrapegraph") {
+    if (env.maxContactEnrichments <= 0) {
+      record("warn", "discovery", `SGAI_API_KEY set but MAX_CONTACT_ENRICHMENTS=${env.maxContactEnrichments}: companies are found, but nobody's address is extracted, so every prospect needs a manual contact.`);
+    } else {
+      record("ok", "discovery", `Live discovery with a second pass over /contact|/team|/about for up to ${env.maxContactEnrichments} companies per run.`);
+    }
   } else {
-    record("ok", "discovery", `Live discovery with a second pass over /contact|/team|/about for up to ${env.maxContactEnrichments} companies per run.`);
+    record(
+      "warn",
+      "discovery",
+      "Discovery returns demo companies: no SGAI_API_KEY, and DISCOVERY_PROVIDER is not set to open. The free option needs no key and costs nothing - set DISCOVERY_PROVIDER=open.",
+    );
   }
 
   if (!env.enrichmentProvider) {
