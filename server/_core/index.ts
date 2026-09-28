@@ -27,7 +27,7 @@ import {
   completeMockCheckout,
 } from "../services/billing";
 import { ingestEmailEvent, handleUnsubscribeByRef } from "../services/replies";
-import { startJobWorker, stopJobWorker } from "../services/jobs";
+import { startJobWorker, stopJobWorker, workerHealth } from "../services/jobs";
 import { mountEspWebhooks } from "./espWebhooks";
 import { mountConversionEndpoints } from "./conversionWebhooks";
 import { assertSchemaReady } from "./schemaCheck";
@@ -59,7 +59,24 @@ app.use(
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, hasDb: getDb() !== null, env: env.nodeEnv });
+  // Liveness, deliberately not queue depth. A backlog is normal and must never
+  // make a monitor drop a node; a worker that stopped ticking is not normal, and
+  // nothing else here would notice, because HTTP keeps serving while the queue
+  // silently freezes. Reads process state only — no database query — so this is
+  // safe to poll as often as an uptime checker likes.
+  const worker = workerHealth();
+  const ok = !worker.wedged;
+  res.status(ok ? 200 : 503).json({
+    ok,
+    hasDb: getDb() !== null,
+    env: env.nodeEnv,
+    worker: {
+      running: worker.running,
+      lastTickMinutesAgo: worker.lastTickMinutesAgo,
+      intervalMs: worker.intervalMs,
+      wedged: worker.wedged,
+    },
+  });
 });
 
 // ── Auth (email + password) ───────────────────────────────────────────────────

@@ -52,7 +52,11 @@ date and the outcome in the PR that enables autopilot.
 - [ ] `pnpm db:migrate` against the target MySQL/TiDB succeeds on an empty database.
 - [ ] Boot logs contain **no** `[schema]` lines. Any that appear name the exact
       `ALTER TABLE` to run — see [database.md](./database.md).
-- [ ] `/api/health` returns `{"ok":true,"hasDb":true}`.
+- [ ] `/api/health` returns `{"ok":true,"hasDb":true,"worker":{"running":true,…}}`.
+      It answers 503 only when the job worker claims to be running and has stopped
+      ticking — see [9. Worker and queue monitoring](#9-worker-and-queue-monitoring).
+- [ ] `/api/health` with no database at all returns 200 and `"hasDb":false` (a dev box
+      that never started a worker is not an incident).
 - [ ] `system_state` exists. A deployment that has not applied `0001_*.sql` reads as
       **paused everywhere**: `autonomyAllowed()` treats an unreadable switch as
       stopped, so nothing autonomous happens *and* nothing errors. That silence is the
@@ -198,6 +202,34 @@ observed to succeed.
 - [ ] Watch the provider's credit meter for one lookup: it must not exceed
       `ENRICHMENT_MAX_PEOPLE` records (Apollo bills per person, and its search results
       carry obfuscated names and no address, so each address costs a second call).
+
+### 9. Worker and queue monitoring
+
+The failure this covers is the one nothing else shows: the site keeps answering while
+the queue stops moving, so no follow-up is ever sent and no error is ever raised.
+
+- [ ] Load the Admin page and read the **Job queue** card without touching the numbers:
+      it must state a verdict ("Queue healthy" / the problems it found) in words.
+- [ ] Poll `/api/health`; confirm `worker.running` is true and `lastTickMinutesAgo`
+      stays small (it is written on every tick, including while a long discovery job runs,
+      so minutes of silence mean the loop is genuinely wedged).
+- [ ] Restart only the process, not MySQL, and confirm the Admin card returns to
+      "worker not running" within ~15 s and recovers on its own — the worker is started
+      by the app, so a deployment that runs the web process without it will show here.
+- [ ] Queue work for a type this build does not know (a row inserted by hand, or an old
+      row left from a previous version) and confirm the report names it as having no
+      handler. This is the silent case: the job waits forever and every count still looks
+      plausible. Delete the row afterwards.
+- [ ] Pull the master autonomy switch with work queued and confirm the card says the
+      work is *held*, lists no backlog problem, and still warns if the worker itself is
+      not running. "Paused" must never be able to disguise a dead worker.
+- [ ] Watch the server log for five minutes: the worker re-assesses itself on that
+      interval and writes `[jobs] queue degraded: …` per problem. Point the hosting
+      provider's log alert at that string — this is the alerting path, there is no
+      external alerting service wired in.
+- [ ] Leave a job `running` and kill the worker; confirm the reclaim path returns it to
+      `queued` within ~10 minutes and that the stuck count in the report agrees with the
+      window (they read the same constant, so change one only with the other).
 
 ## Known limitation: Stripe Payment Links join on email
 

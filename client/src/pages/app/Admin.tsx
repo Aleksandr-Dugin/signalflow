@@ -54,6 +54,7 @@ export default function Admin() {
   const users = trpc.admin.users.useQuery({ limit: 200 }, { enabled: isAdmin });
   const workspaces = trpc.admin.workspaces.useQuery({ limit: 200 }, { enabled: isAdmin });
   const jobs = trpc.admin.recentJobs.useQuery({ limit: 30 }, { enabled: isAdmin });
+  const queue = trpc.admin.queue.useQuery(undefined, { enabled: isAdmin, refetchInterval: 15000 });
   const autonomy = trpc.admin.autonomy.useQuery(undefined, {
     enabled: isAdmin,
     refetchInterval: 10000,
@@ -212,7 +213,62 @@ export default function Admin() {
       {/* Jobs */}
       <Card className="brutal-sm mb-4">
         <CardContent className="p-5">
-          <div className="mb-3 flex items-center gap-2 text-sm font-medium"><Workflow className="h-4 w-4 text-primary" /> Job queue</div>
+          <div className="mb-3 flex flex-wrap items-center gap-2 text-sm font-medium">
+            <Workflow className="h-4 w-4 text-primary" /> Job queue
+            {queue.data === undefined
+              ? <span className="text-xs font-normal text-muted-foreground">
+                  {queue.isPending ? "checking…" : "unreadable — the query failed, so this says nothing about the queue"}
+                </span>
+              : queue.data === null
+                ? <StatusChip ok={false} label="No database — queue unreadable" />
+                : <StatusChip ok={queue.data.health === "ok"} label={queue.data.health === "ok" ? "Queue healthy" : `Queue degraded (${queue.data.problems.length})`} />}
+          </div>
+          {/* Four numbers say nothing on their own: 12 queued is fine when the worker
+              is chewing through them and an incident when nothing is ticking. So the
+              verdict is stated first, in words, and the raw counts stay underneath. */}
+          {queue.data ? (
+            <div className="mb-4 space-y-2">
+              <p className="text-xs text-muted-foreground">
+                Worker {queue.data.workerRunning ? "running" : "not running"}
+                {queue.data.lastTickMinutesAgo !== null
+                  ? `, last tick ${queue.data.lastTickMinutesAgo} min ago`
+                  : ""}
+                {queue.data.running > 0 ? ` · ${queue.data.running} in flight` : ""}
+                {queue.data.totalQueued > 0 ? ` · ${queue.data.totalQueued} queued` : ""}
+                .
+              </p>
+              {queue.data.problems.length > 0 ? (
+                <ul className="space-y-1.5">
+                  {queue.data.problems.map((p) => (
+                    <li key={p} className="rounded-md border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                      {p}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-success">
+                  No problems: every queued type has a handler here, and the worker is ticking.
+                </p>
+              )}
+              {/* Held work must never read as a fault: while the master switch is
+                  pulled, a growing queue is the switch doing its job. */}
+              {queue.data.heldMinutes !== null ? (
+                <p className="text-xs text-muted-foreground">
+                  Autonomy is paused platform-wide, so {queue.data.totalQueued} queued job(s) have been
+                  held {queue.data.heldMinutes} min — they run on resume, not a failure.
+                </p>
+              ) : null}
+              {queue.data.queuedByType.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {queue.data.queuedByType.map((q) => (
+                    <Badge key={q.type} variant={queue.data!.unhandled.some((u) => u.type === q.type) ? "destructive" : "muted"}>
+                      {q.type} · {q.count}
+                    </Badge>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             {(["queued", "running", "completed", "failed"] as const).map((k) => (
               <div key={k} className="rounded-[3px] border border-[var(--brutal-line)] bg-card p-3">

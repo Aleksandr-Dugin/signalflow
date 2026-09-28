@@ -13,7 +13,7 @@ import * as schema from "../drizzle/schema";
 import { closeDb, getDb } from "./_core/database";
 import { env } from "./_core/env";
 import { detectSchemaDrift } from "./_core/schemaCheck";
-import { getJob, runNextJob } from "./services/jobs";
+import { enqueueJob, getJob, queueReport, runNextJob } from "./services/jobs";
 import {
   isAutopilotGloballyPaused,
   readGlobalAutonomyState,
@@ -495,6 +495,24 @@ suite("autonomous loop against a real database", () => {
     // Hand the prospect back to the contact the rest of the loop is built around.
     await db!.update(schema.prospects).set({ contactId }).where(eq(schema.prospects.id, prospectId));
     await db!.delete(schema.contacts).where(eq(schema.contacts.id, saved.id));
+  });
+
+  // Monitoring has to be proved against the real table: the aggregates behind it
+  // are GROUP BY / MIN / COUNT over columns this file otherwise only ever writes.
+  it("names queued work the worker cannot run, instead of reporting it as healthy", async () => {
+    const ghostId = await enqueueJob({ workspaceId, type: "integration.ghost", payload: {} });
+    const report = await queueReport();
+    expect(report).not.toBeNull();
+    expect(report!.unhandled.map((u) => u.type)).toContain("integration.ghost");
+    expect(report!.queuedByType.map((q) => q.type)).toContain("integration.ghost");
+    expect(report!.health).toBe("degraded");
+    expect(report!.problems.join(" ")).toMatch(/no handler/i);
+    // Unrunnable work is diagnosed as unrunnable, never as a slow queue.
+    expect(report!.problems.join(" ")).not.toMatch(/Backlog/);
+
+    await db!.delete(schema.jobRuns).where(eq(schema.jobRuns.id, ghostId));
+    const after = await queueReport();
+    expect(after!.unhandled.map((u) => u.type)).not.toContain("integration.ghost");
   });
 
   // Kept last: it flips a global switch, so it must not overlap with any test

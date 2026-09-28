@@ -44,6 +44,7 @@ import {
   readGlobalAutonomyState,
   setAutopilotGloballyPaused,
 } from "./services/autonomyState";
+import { queueReport } from "./services/jobs";
 
 async function requireWorkspace(ctx: { user: { id: string } }): Promise<string> {
   return resolveWorkspace(ctx.user.id);
@@ -375,6 +376,11 @@ export const appRouter = router({
         }
       }),
     overview: adminProcedure.query(() => adminOverview()),
+    // Separate from overview because it answers a different question: overview is
+    // "how much is there", this is "is the thing that moves it actually moving".
+    // Null means there is no database to read — which the UI must show as such,
+    // rather than as an empty, healthy queue.
+    queue: adminProcedure.query(() => queueReport()),
     users: adminProcedure
       .input(z.object({ limit: z.number().int().min(1).max(500).optional() }))
       .query(({ input }) => adminListUsers(input.limit ?? 100)),

@@ -147,6 +147,46 @@ the examples in their docs — whose site could not be reached from the network 
 written on. Every Hunter field is therefore read through an alias list, and the first
 live call must be diffed against a logged raw body (`docs/verification.md`, §8).
 
+## Watching the loop: worker and queue monitoring
+
+A queue that stops moving is the worst failure this system has, because it fails
+quietly: HTTP keeps answering, nothing throws, and no follow-up is ever sent.
+`queueReport()` ([server/services/jobs.ts](../server/services/jobs.ts)) exists to make
+five specific silent failures loud. `summarizeQueue()` is deliberately pure — the SQL
+only counts rows — so every verdict an operator relies on is testable
+([server/jobs.test.ts](../server/jobs.test.ts)) instead of a reading exercise over SQL.
+
+| Signal | The failure it detects | Why it is not covered elsewhere |
+| --- | --- | --- |
+| Queued type with no handler in this process | work that waits forever | the row is perfectly valid; only this build cannot run it |
+| Runnable job older than 15 minutes | throughput collapse | count-only views show "12 queued" as neutral |
+| `running` rows past the reclaim window | a worker that died mid-job | they are invisible until the window expires |
+| Worker running but not ticking | a wedged loop or a blocked event loop | the process is up, so liveness probes pass |
+| Failures in the last 24 h | slow rot | a queue that drains *and* fails looks healthy |
+
+Three separations the code insists on:
+
+- **Liveness is not queue depth.** `/api/health` answers 503 only when the worker claims
+  to be running and has stopped ticking — the one state a restart fixes. A backlog never
+  makes an instance look down, because a backlog is normal and dropping a node over one
+  turns an inconvenience into an outage. It reads process state only, no database query,
+  so a monitor may poll it as often as it likes.
+- **Held is not stalled.** While the master autonomy switch is pulled, waiting work is the
+  switch doing its job and is reported as `heldMinutes`, not as a problem. The exception is
+  a worker that is not running at all: pausing cannot disguise a dead worker, because
+  nothing would drain the queue on resume either.
+- **Unrunnable is not slow.** Work with no handler is diagnosed as impossible, and is
+  excluded from the backlog measure — telling an operator "the oldest job has waited 3
+  days" when the real answer is "nobody here can run this type" sends them to the wrong
+  lever.
+
+Alerting, without an alerting service: the worker assesses itself every 5 minutes and
+writes one `[jobs] queue degraded: …` warning per problem into the process log, which is
+the string to point a hosting provider's log alert at. The heartbeat is stamped at the
+*start* of each tick, so a discovery job that runs for minutes is not mistaken for a
+wedged loop; the grace period is five ticks, floored at one minute, and the stuck-job
+window shares one constant with the reclaim path so the two can never disagree.
+
 ## Funnel stages are evidence-driven, never cosmetic
 
 `opportunities.stage` advances only when something *external confirms it happened*.
