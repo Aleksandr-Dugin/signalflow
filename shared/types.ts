@@ -70,12 +70,29 @@ export interface PersonalizationDraft {
   provider: ProviderMode;
 }
 
+/**
+ * How a contact entered the system. Not decoration: the answer changes what you
+ * may do with it. A `page` address was published by the company itself; a
+ * `provider` address was bought from a data vendor, which is lawful but is a
+ * different GDPR story and a different expectation of accuracy; `manual` came
+ * from an operator, who presumably knows the person.
+ */
+export type ContactOrigin = "manual" | "page" | "provider";
+
 export interface ContactRef {
   id: string;
   name: string;
   title?: string | null;
   email: string;
   verified: boolean;
+  origin: ContactOrigin;
+  /**
+   * Collected but not sendable: email is still the only outbound channel, so a
+   * phone number or profile link is a coordinate for a human to act on, not a
+   * thing the pipeline may dial. It is stored because the lookup was paid for.
+   */
+  phone: string | null;
+  socialUrl: string | null;
   /**
    * Where the address was published, when we know. Provenance is not decoration:
    * an operator deciding whether to cold-mail this person needs to see the page

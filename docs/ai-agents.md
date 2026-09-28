@@ -117,6 +117,36 @@ platform's scraper credits. It returns `null` ("they publish nothing") rather th
 throwing, so the UI can report an honest empty result, and it refuses demo
 prospects and unconfigured providers with a message instead of silence.
 
+### The paid route to a person: enrichment
+
+Reading a company's own pages finds only what that company chose to print. When it
+prints nothing, or only `hello@`, the remaining *lawful* route to a named person —
+and to a phone number or profile, which scraping LinkedIn would otherwise have to
+get by breaking its terms of service — is a vendor that licenses the data.
+`server/services/enrichment.ts` speaks to Hunter.io (`domain-search`) and Apollo
+(`mixed_people/api_search` then `people/match`). Clay is not wired: it has no public,
+transcribable API, and writing an adapter for it would be a guess dressed as a feature.
+
+| Rule | Why it is load-bearing |
+| --- | --- |
+| **Nothing is bought unless `ENRICHMENT_PROVIDER` names the provider.** A key in the environment is not consent. | Otherwise any code path that happens to touch enrichment starts charging money, and the deployment owner learns about it from an invoice. |
+| The paid leg runs only when the operator clicked "Buy a lookup", and only when the free pass failed to name a *person* | Spending is a deliberate act, and it should be spent where free reading came back empty — not on a name the company already published. |
+| Unattended discovery buys nothing unless `ENRICHMENT_AUTO_DISCOVER=true` — a second switch, on top of `ENRICHMENT_PROVIDER` | This is the same rule the autopilot follows everywhere: autonomy may spend effort, never money by surprise. When it is on, the bought lookups share the `MAX_CONTACT_ENRICHMENTS` budget, so one knob still bounds what a run can cost. |
+| Before anything is stored, a record is refused if it is a personal mailbox, a role mailbox (`info@`, `support…`), a `low`/`none` match, or labelled `risky`/`invalid`/`catch_all`/`role` | We are paying for a named human at the company's own domain. Anything else is a stranger with a bought address — and a bad mailbox damages the sending domain, not merely this one message. |
+| An obfuscated name (`Hu***n`) is never used as a name | Apollo's search results hide surnames until the paid enrichment; greeting "Dear Hu***n" is worse than greeting nobody. |
+| `reveal_personal_emails` and `reveal_phone_number` are never requested | The first is exactly what the rule above refuses; the second costs 8 credits and arrives on a webhook this app does not have. Numbers are taken only when the synchronous response already carries them. |
+| Phones and profile URLs are stored but never sent | `outreach_messages.channel` is an enum with the single value `email`. A phone number is a coordinate for a human to act on, and the UI labels it "recorded only". |
+| `contacts.origin` ∈ `manual` \| `page` \| `provider`; a re-run fills empty fields and overwrites nothing | Provenance decides what you may lawfully do with a record and how much to trust it. An operator typing an address outranks a scrape; a scrape outranks a bought guess. |
+| The request URL is scrubbed of `api_key` before it is stored as `sourceUrl` | Hunter authenticates in the query string and `sourceUrl` is a column the browser renders. Without this, every contact row is a credential leak. |
+| A provider that is down degrades to "no data" plus a warning; a provider that is *not configured* throws | "They are not in the database" is a fact about the prospect; "you have not set ENRICHMENT_PROVIDER" is a fact about the deployment. Only the second should look like an error. |
+| `ENRICHMENT_MAX_PEOPLE` caps records per lookup | Apollo bills per person, and its two-call shape (search, then match) means the cheap filter has to run before the spend, not after. |
+
+Field-name honesty, stated because it changes how much these tests are worth: the
+Apollo mapping is transcribed from Apollo's published OpenAPI, the Hunter mapping from
+the examples in their docs — whose site could not be reached from the network this was
+written on. Every Hunter field is therefore read through an alias list, and the first
+live call must be diffed against a logged raw body (`docs/verification.md`, §8).
+
 ## Funnel stages are evidence-driven, never cosmetic
 
 `opportunities.stage` advances only when something *external confirms it happened*.

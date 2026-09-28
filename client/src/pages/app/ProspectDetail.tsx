@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "wouter";
 import { toast } from "sonner";
-import { Sparkles, Send, ArrowLeft, ExternalLink, Mail, Search } from "lucide-react";
+import { Sparkles, Send, ArrowLeft, ExternalLink, Mail, Phone, Search, UserCheck } from "lucide-react";
 import { trpc } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -15,7 +15,16 @@ function ContactCard({
   live,
 }: {
   prospectId: string;
-  contact?: { name: string; title?: string | null; email: string; verified: boolean; sourceUrl?: string | null } | null;
+  contact?: {
+    name: string;
+    title?: string | null;
+    email: string;
+    verified: boolean;
+    origin?: "manual" | "page" | "provider";
+    phone?: string | null;
+    socialUrl?: string | null;
+    sourceUrl?: string | null;
+  } | null;
   // Only a real company has real pages to read. Demo prospects must never be
   // offered a search that would "find" an address belonging to whoever now owns
   // the invented domain.
@@ -26,13 +35,20 @@ function ContactCard({
   const [name, setName] = useState(contact?.name ?? "");
   const [title, setTitle] = useState(contact?.title ?? "");
   const [email, setEmail] = useState(contact?.email ?? "");
+  const [phone, setPhone] = useState(contact?.phone ?? "");
 
   useEffect(() => {
     setName(contact?.name ?? "");
     setTitle(contact?.title ?? "");
     setEmail(contact?.email ?? "");
+    setPhone(contact?.phone ?? "");
     setEditing(!contact);
   }, [contact]);
+
+  // Asked rather than assumed: the two searches cost different things (scraper
+  // credits vs a per-record vendor bill), and a button that can only throw an
+  // error is worse than no button at all.
+  const capabilities = trpc.contact.capabilities.useQuery(undefined, { staleTime: 60_000 });
 
   const save = trpc.contact.upsert.useMutation({
     onSuccess: (c) => {
@@ -59,7 +75,7 @@ function ContactCard({
         // Say so plainly. "Nothing found" is information, and hiding it behind a
         // spinner or a silent no-op is how an operator ends up trusting a contact
         // that was never there.
-        toast.info("They publish no address on their own pages — add one below.");
+        toast.info("They publish no address we can use — add one below.");
       }
     },
     onError: (e) => toast.error(e.message),
@@ -77,8 +93,36 @@ function ContactCard({
             {contact.name || "Shared mailbox"}{contact.title ? ` — ${contact.title}` : ""}
           </div>
           <div className="text-sm text-muted-foreground">{contact.email || "No email"}</div>
-          <Badge variant={contact.verified ? "success" : "muted"} className="mt-2">{contact.verified ? "verified" : "unverified"}</Badge>
-          {contact.sourceUrl ? (
+          {contact.phone ? (
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
+              <Phone className="h-3.5 w-3.5 shrink-0" />
+              <span className="font-mono">{contact.phone}</span>
+              {/* Honest about the gap: recorded, but nothing here can dial it. */}
+              <span className="text-xs">recorded only - email is the only channel we send</span>
+            </div>
+          ) : null}
+          {contact.socialUrl ? (
+            <a
+              href={contact.socialUrl}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+            >
+              <ExternalLink className="h-3.5 w-3.5 shrink-0" /> Profile
+            </a>
+          ) : null}
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Badge variant={contact.verified ? "success" : "muted"}>{contact.verified ? "verified" : "unverified"}</Badge>
+            {contact.origin === "provider" ? <Badge variant="outline">bought lookup</Badge> : null}
+          </div>
+          {/* Provenance differs by origin and the difference matters: a page link can
+              be opened and checked by eye, the API call behind a bought address cannot,
+              so the two must not wear the same label. */}
+          {contact.origin === "provider" ? (
+            <p className="mt-2 text-xs text-muted-foreground">
+              From a paid data provider - the vendor's claim about this address, not a page we read.
+            </p>
+          ) : contact.sourceUrl ? (
             <a
               href={contact.sourceUrl}
               target="_blank"
@@ -87,6 +131,10 @@ function ContactCard({
             >
               <ExternalLink className="h-3 w-3" /> Published on this page
             </a>
+          ) : contact.origin === "manual" ? (
+            <p className="mt-2 flex items-center gap-1 text-xs text-muted-foreground">
+              <UserCheck className="h-3 w-3" /> Added by hand
+            </p>
           ) : null}
         </CardContent>
       </Card>
@@ -99,7 +147,7 @@ function ContactCard({
         <h3 className="font-semibold">{contact ? "Edit contact" : "Add contact"}</h3>
         <p className="text-xs text-muted-foreground">
           {live
-            ? "Discovery also reads this company's own contact and team pages. If it came back empty, add the decision-maker here."
+            ? "Discovery reads this company's own contact and team pages. If it came back empty, add the decision-maker here."
             : "This is a demo company with no real website, so a contact can only be typed in."}
         </p>
         <div className="space-y-1.5">
@@ -114,22 +162,51 @@ function ContactCard({
           <Label htmlFor="c-email">Email</Label>
           <Input id="c-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="ada@company.com" />
         </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="c-phone">Phone (optional)</Label>
+          <Input
+            id="c-phone"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            placeholder="+1 415 555 0158"
+          />
+          <p className="text-xs text-muted-foreground">Kept for reference - outreach still only sends email.</p>
+        </div>
         <div className="flex items-center gap-2">
           <Button
             className="flex-1"
-            onClick={() => save.mutate({ prospectId, name: name.trim(), title: title.trim() || undefined, email: email.trim() })}
+            onClick={() =>
+              save.mutate({
+                prospectId,
+                name: name.trim(),
+                title: title.trim() || undefined,
+                email: email.trim(),
+                phone: phone.trim() || undefined,
+              })
+            }
             disabled={!name.trim() || !email.trim() || save.isPending}
           >
             {save.isPending ? <Spinner /> : <Mail className="h-4 w-4" />} Save contact
           </Button>
-          {live ? (
+          {live && capabilities.data?.pages ? (
             <Button
               variant="outline"
               onClick={() => search.mutate({ prospectId })}
               disabled={search.isPending}
-              title="Search their /contact, /team and /about pages for a published address"
+              title="Search their /contact, /team and /about pages for a published address (uses scraper credits)"
             >
               {search.isPending ? <Spinner /> : <Search className="h-4 w-4" />} Search their site
+            </Button>
+          ) : null}
+          {live && capabilities.data?.enrichment ? (
+            <Button
+              variant="outline"
+              onClick={() => search.mutate({ prospectId, paid: true })}
+              disabled={search.isPending}
+              title={`Ask ${capabilities.data.enrichment} for a named decision-maker. Billed per record by your own provider key.`}
+            >
+              {search.isPending ? <Spinner /> : <Search className="h-4 w-4" />}
+              Buy a lookup ({capabilities.data.enrichment})
             </Button>
           ) : null}
           {contact ? <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>Cancel</Button> : null}

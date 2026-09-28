@@ -5,7 +5,14 @@ import { nanoid } from "nanoid";
 import * as schema from "../drizzle/schema";
 import { getDb } from "./_core/database";
 import { env } from "./_core/env";
-import type { IcpCriteria, ProspectCard, ProspectDetail, PersonalizationDraft, ContactRef } from "../shared/types";
+import type {
+  IcpCriteria,
+  ProspectCard,
+  ProspectDetail,
+  PersonalizationDraft,
+  ContactRef,
+  ContactOrigin,
+} from "../shared/types";
 import type { PlanId } from "../shared/plans";
 import { getPlan } from "../shared/plans";
 import { detectObjections } from "../shared/const";
@@ -29,6 +36,7 @@ import {
 } from "./services/providers";
 import { scoreProspect } from "./services/opportunity";
 import { enrichCandidateWithContact, enrichCandidatesWithContacts } from "./services/contactExtraction";
+import { getEnrichmentProvider, lookupPeople, type EnrichedPerson } from "./services/enrichment";
 
 // ── Workspace resolution ─────────────────────────────────────────────────────
 export async function resolveWorkspace(userId: string): Promise<string> {
@@ -278,27 +286,82 @@ async function upsertCompany(
   return id;
 }
 
+/** A contact as the discovery and enrichment legs see it, before it is a row. */
+interface ContactInput {
+  name: string;
+  title: string | null;
+  email: string;
+  origin: ContactOrigin;
+  sourceUrl: string | null;
+  phone?: string | null;
+  socialUrl?: string | null;
+}
+
+/** The address a company printed about itself, if it printed one. */
+function candidateContact(c: CompanyCandidate): ContactInput | null {
+  if (!c.contact?.email) return null;
+  return {
+    name: c.contact.name,
+    title: c.contact.title ?? null,
+    email: c.contact.email,
+    origin: "page",
+    sourceUrl: c.contact.sourceUrl ?? c.sourceUrl,
+  };
+}
+
+/**
+ * A record a data vendor returned. The phone number and profile link are kept
+ * because the lookup was paid for and dropping the row would waste it — but
+ * nothing here pretends they are sendable: email is still the only channel.
+ */
+function providerContact(p: EnrichedPerson): ContactInput | null {
+  if (!p.email) return null;
+  return {
+    name: [p.firstName, p.lastName].filter(Boolean).join(" ").trim(),
+    title: p.title,
+    email: p.email,
+    origin: "provider",
+    phone: p.phone,
+    socialUrl: p.socialUrl,
+    sourceUrl: p.sourceUrl,
+  };
+}
+
 async function upsertContact(
   db: NonNullable<ReturnType<typeof getDb>>,
   workspaceId: string,
   companyId: string,
-  c: CompanyCandidate,
+  c: ContactInput,
 ): Promise<string | null> {
-  if (!c.contact?.email) return null;
-  const email = c.contact.email.toLowerCase();
+  const email = c.email.toLowerCase();
+  if (!email) return null;
   const [existing] = await db
     .select()
     .from(schema.contacts)
     .where(and(eq(schema.contacts.companyId, companyId), eq(schema.contacts.email, email)))
     .limit(1);
-  if (existing) return existing.id;
+  if (existing) {
+    // Fill gaps, never overwrite. Discovery and enrichment both re-run, and a
+    // second pass that blanked a title an operator typed — or re-labelled where
+    // an address came from — would quietly destroy the more trustworthy record.
+    const patch: { name?: string; title?: string; phone?: string; socialUrl?: string; sourceUrl?: string } = {};
+    if (!existing.name && c.name) patch.name = c.name;
+    if (!existing.title && c.title) patch.title = c.title;
+    if (!existing.phone && c.phone) patch.phone = c.phone;
+    if (!existing.socialUrl && c.socialUrl) patch.socialUrl = c.socialUrl;
+    if (!existing.sourceUrl && c.sourceUrl) patch.sourceUrl = c.sourceUrl;
+    if (Object.keys(patch).length > 0) {
+      await db.update(schema.contacts).set(patch).where(eq(schema.contacts.id, existing.id));
+    }
+    return existing.id;
+  }
   const id = nanoid();
   await db.insert(schema.contacts).values({
     id,
     workspaceId,
     companyId,
-    name: c.contact.name,
-    title: c.contact.title ?? null,
+    name: c.name,
+    title: c.title,
     email,
     // Same check the manual path uses: the domain can receive mail at all. That
     // proves less than a mailbox verification would (we cannot do that without
@@ -306,9 +369,37 @@ async function upsertContact(
     // marked unverified while manual ones are marked is worse than useless — the
     // operator would rightly assume nothing was ever checked.
     verified: await domainHasMailRecords(email.split("@")[1] ?? ""),
-    sourceUrl: c.contact.sourceUrl ?? c.sourceUrl,
+    sourceUrl: c.sourceUrl,
+    origin: c.origin,
+    phone: c.phone ?? null,
+    socialUrl: c.socialUrl ?? null,
   });
   return id;
+}
+
+/**
+ * Read the label back defensively. A value this build does not know (a row
+ * written by a future version, or a hand-edited row) falls back to `manual`,
+ * which is exactly the column's own default — so the fallback is the state a
+ * row with no declared origin claims to be in.
+ */
+const CONTACT_ORIGINS: string[] = ["manual", "page", "provider"];
+function asContactOrigin(value: string | null | undefined): ContactOrigin {
+  return value && CONTACT_ORIGINS.includes(value) ? (value as ContactOrigin) : "manual";
+}
+
+function contactRef(r: typeof schema.contacts.$inferSelect): ContactRef {
+  return {
+    id: r.id,
+    name: r.name,
+    title: r.title ?? null,
+    email: r.email ?? "",
+    verified: r.verified,
+    origin: asContactOrigin(r.origin),
+    phone: r.phone ?? null,
+    socialUrl: r.socialUrl ?? null,
+    sourceUrl: r.sourceUrl ?? null,
+  };
 }
 
 export interface DiscoveryOutcome {
@@ -362,6 +453,13 @@ export async function runDiscovery(workspaceId: string, campaignId: string): Pro
     origin === "live" ? env.maxContactEnrichments : 0,
   );
 
+  // Buying contacts during an unattended run needs a second, explicit switch
+  // beyond ENRICHMENT_PROVIDER: autonomy may spend effort, never money by
+  // surprise. Shares the MAX_CONTACT_ENRICHMENTS budget with the free pass, so one
+  // knob still bounds what a single run can cost.
+  let autoEnrichBudget =
+    origin === "live" && env.enrichmentAutoDiscover && getEnrichmentProvider() ? env.maxContactEnrichments : 0;
+
   const existingProspects = await db
     .select({ id: schema.prospects.id })
     .from(schema.prospects)
@@ -375,7 +473,16 @@ export async function runDiscovery(workspaceId: string, campaignId: string): Pro
     if (existingProspects.length + created >= cap) break;
     try {
       const companyId = await upsertCompany(db, workspaceId, c);
-      const contactId = await upsertContact(db, workspaceId, companyId, c);
+      // Free first, always. A bought record is sought only when the company's own
+      // pages named nobody — and if the pages offered just a shared mailbox, that
+      // address is dropped in favour of the named person, because the row is what
+      // the outreach will be sent to.
+      let found = candidateContact(c);
+      if (autoEnrichBudget > 0 && !found?.name && c.domain) {
+        autoEnrichBudget -= 1;
+        found = (await buyContact(c.domain)) ?? found;
+      }
+      const contactId = found ? await upsertContact(db, workspaceId, companyId, found) : null;
 
       const [prospect] = await db
         .select()
@@ -568,17 +675,9 @@ export async function getProspectDetail(workspaceId: string, prospectId: string)
   let contact = null as null | ProspectDetail["contact"];
   if (prospect.contactId) {
     const [row] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, prospect.contactId)).limit(1);
-    if (row)
-      contact = {
-        id: row.id,
-        name: row.name,
-        title: row.title,
-        email: row.email ?? "",
-        verified: row.verified,
-        // Surfaced in the UI so a scraped address is always traceable to the page
-        // that printed it.
-        sourceUrl: row.sourceUrl ?? null,
-      };
+    // One mapper for every contact read, so "where did this come from" cannot be
+    // answered differently on one screen than on another.
+    if (row) contact = contactRef(row);
   }
   const signalRows = await db.select().from(schema.signals).where(eq(schema.signals.companyId, prospect.companyId));
   const researchRows = await db
@@ -661,19 +760,19 @@ export async function listContacts(workspaceId: string, prospectId: string): Pro
     .from(schema.contacts)
     .where(and(eq(schema.contacts.companyId, prospect.companyId), eq(schema.contacts.workspaceId, workspaceId)))
     .orderBy(desc(schema.contacts.createdAt));
-  return rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    title: r.title ?? null,
-    email: r.email ?? "",
-    verified: r.verified,
-    sourceUrl: r.sourceUrl ?? null,
-  }));
+  return rows.map(contactRef);
 }
 
+/**
+ * An operator typing an address is the strongest evidence this system has, so it
+ * outranks a scrape: the row's origin becomes `manual`. Anything the human left
+ * blank (phone, profile, title) keeps whatever the paid or scraped lookup had
+ * already filled in — those were bought, and a form that forgot to mention the
+ * phone field must not silently delete it.
+ */
 export async function upsertManualContact(
   workspaceId: string,
-  input: { prospectId: string; name: string; title?: string; email: string },
+  input: { prospectId: string; name: string; title?: string; email: string; phone?: string },
 ): Promise<ContactRef> {
   const db = getDb();
   if (!db) throw new Error("Database unavailable.");
@@ -689,6 +788,7 @@ export async function upsertManualContact(
   const verified = await domainHasMailRecords(email.split("@")[1] ?? "");
   const name = input.name.trim();
   const title = input.title?.trim() || null;
+  const phone = input.phone?.trim().slice(0, 40) || null;
 
   const [existing] = await db
     .select()
@@ -700,7 +800,7 @@ export async function upsertManualContact(
   if (existing) {
     await db
       .update(schema.contacts)
-      .set({ name, title, verified })
+      .set({ name, title, verified, origin: "manual", ...(phone ? { phone } : {}) })
       .where(eq(schema.contacts.id, existing.id));
     contactId = existing.id;
   } else {
@@ -713,25 +813,41 @@ export async function upsertManualContact(
       title,
       email,
       verified,
+      origin: "manual",
+      phone,
     });
   }
   await db.update(schema.prospects).set({ contactId }).where(eq(schema.prospects.id, input.prospectId));
-  return { id: contactId, name, title, email, verified };
+  const [row] = await db
+    .select()
+    .from(schema.contacts)
+    .where(and(eq(schema.contacts.id, contactId), eq(schema.contacts.workspaceId, workspaceId)))
+    .limit(1);
+  if (!row) throw new Error("Contact could not be saved.");
+  return contactRef(row);
 }
 
 /**
  * On-demand version of the discovery contact pass, for one prospect the operator
  * is looking at ("find the person for me"). Returns the stored contact, or null
- * when the company's own pages publish no usable address — a real answer, not an
- * error, and the UI must say exactly that rather than spin forever.
+ * when nothing usable was found — a real answer, not an error, and the UI must
+ * say exactly that rather than spin forever.
  *
- * It never overwrites a contact we already have from another source: the
- * enrichment step refuses to replace a typed address, and the same rule applies
- * here, because an operator's knowledge beats a footer scrape.
+ * Two legs, in this order, because one is free and one is not:
+ * 1. read the company's own pages (scraper credits only), and
+ * 2. if `paid` was explicitly asked for and leg 1 found no *person* — a shared
+ *    mailbox does not count — buy a lookup from the configured data provider.
+ * Leg 2 never runs on its own initiative: enrichment charges money per record, so
+ * it requires a deliberate click, and the UI labels it as such.
+ *
+ * It never overwrites what is already recorded: a later pass fills fields that
+ * are still empty and touches nothing that has a value, because an operator's
+ * knowledge and a page the company printed itself both outrank a bought guess.
  */
 export async function enrichProspectContact(
   workspaceId: string,
   prospectId: string,
+  opts: { paid?: boolean } = {},
 ): Promise<ContactRef | null> {
   const db = getDb();
   if (!db) throw new Error("Database unavailable.");
@@ -754,15 +870,18 @@ export async function enrichProspectContact(
   if (!company.domain) throw new Error("This prospect has no website domain to search.");
 
   const discovery = getDiscoveryProvider();
-  if (discovery.name !== "scrapegraph") {
-    throw new Error("No discovery provider configured. Set SGAI_API_KEY to search contact pages.");
+  const wantPaid = opts.paid === true;
+  if (discovery.name !== "scrapegraph" && !wantPaid) {
+    throw new Error(
+      "No contact search available. Set SGAI_API_KEY to read their own pages, or ENRICHMENT_PROVIDER to buy a lookup.",
+    );
   }
-  const paid = getAIProvider().name === "groq";
-  await ensureAiBudget(workspaceId, paid, 1);
 
-  const enriched = await enrichCandidateWithContact(
-    (urls) => discovery.fetchPages(urls),
-    {
+  let found: ContactInput | null = null;
+  if (discovery.name === "scrapegraph") {
+    const aiPaid = getAIProvider().name === "groq";
+    await ensureAiBudget(workspaceId, aiPaid, 1);
+    const enriched = await enrichCandidateWithContact((urls) => discovery.fetchPages(urls), {
       name: company.name,
       domain: company.domain,
       description: company.description ?? "",
@@ -770,11 +889,19 @@ export async function enrichProspectContact(
       sourceUrl: company.websiteUrl ?? `https://${company.domain}`,
       origin: "live",
       evidence: [],
-    },
-  );
-  if (!enriched.contact?.email) return null;
+    });
+    found = candidateContact(enriched);
+  }
 
-  const contactId = await upsertContact(db, workspaceId, company.id, enriched);
+  // A page that prints only `hello@` has told us how to reach the company, not who
+  // to ask. That is exactly the case a paid lookup exists for, so a nameless
+  // result counts as "not found" here even though it is still kept as a fallback.
+  if (wantPaid && !found?.name) {
+    found = (await buyContact(company.domain)) ?? found;
+  }
+  if (!found) return null;
+
+  const contactId = await upsertContact(db, workspaceId, company.id, found);
   if (!contactId) return null;
   await db.update(schema.prospects).set({ contactId }).where(eq(schema.prospects.id, prospectId));
 
@@ -783,15 +910,35 @@ export async function enrichProspectContact(
     .from(schema.contacts)
     .where(and(eq(schema.contacts.id, contactId), eq(schema.contacts.workspaceId, workspaceId)))
     .limit(1);
-  if (!row) return null;
+  return row ? contactRef(row) : null;
+}
+
+/**
+ * What the two contact-search buttons can actually do, so the UI never offers a
+ * click that can only fail. `enrichment` is the configured provider's name:
+ * "Buy a lookup (Hunter)" is a different decision from "Buy a lookup (Apollo)",
+ * and both are a different decision from reading the pages for free.
+ */
+export function contactSearchCapabilities(): { pages: boolean; enrichment: string | null } {
   return {
-    id: row.id,
-    name: row.name,
-    title: row.title ?? null,
-    email: row.email ?? "",
-    verified: row.verified,
-    sourceUrl: row.sourceUrl ?? null,
+    pages: getDiscoveryProvider().name === "scrapegraph",
+    enrichment: getEnrichmentProvider()?.name ?? null,
   };
+}
+
+/**
+ * The paid leg. Throws when no provider was configured, because the operator
+ * clicked a button that says it buys something and deserves to know it did not;
+ * degrades to null when the provider was reachable and simply has nobody, or is
+ * down — "they are not in the database" is information, an exception is not.
+ */
+async function buyContact(domain: string): Promise<ContactInput | null> {
+  const provider = getEnrichmentProvider();
+  if (!provider) {
+    throw new Error("No enrichment provider configured. Set ENRICHMENT_PROVIDER to hunter or apollo with its API key.");
+  }
+  const people = await lookupPeople(provider, { domain, limit: Math.max(1, env.enrichmentMaxPeople) });
+  return people.length ? providerContact(people[0]) : null;
 }
 
 // ── Personalization ─────────────────────────────────────────────────────────

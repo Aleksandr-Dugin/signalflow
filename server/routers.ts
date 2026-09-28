@@ -14,6 +14,7 @@ import { isProviderConfigured } from "./_core/oauth";
 import { hit } from "./_core/rateLimit";
 import {
   createCampaign,
+  contactSearchCapabilities,
   enrichProspectContact,
   generateIcpForWorkspace,
   generatePersonalization,
@@ -261,6 +262,9 @@ export const appRouter = router({
           name: z.string().min(1).max(200),
           title: z.string().max(200).optional(),
           email: z.string().email().max(320),
+          // A phone number can be recorded but not sent to: email is still the
+          // only outbound channel. The UI says so next to the field.
+          phone: z.string().max(40).optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -272,13 +276,16 @@ export const appRouter = router({
           throw new TRPCError({ code: "BAD_REQUEST", message });
         }
       }),
+    // Which of the two searches this deployment can perform. Read by the UI so it
+    // never renders a button that would only throw.
+    capabilities: protectedProcedure.query(() => contactSearchCapabilities()),
     // Search this company's own public pages for an address they published.
     // Metered twice on purpose: the plan budget inside db.ts, and this wall-clock
     // per-workspace cap — every click costs scraper credits, so one operator
     // hammering the button must not be able to exhaust the provider key for the
     // whole platform.
     enrich: protectedProcedure
-      .input(z.object({ prospectId: z.string() }))
+      .input(z.object({ prospectId: z.string(), paid: z.boolean().optional() }))
       .mutation(async ({ ctx, input }) => {
         const workspaceId = await requireWorkspace(ctx);
         const { ok, retryAfterSec } = hit(`contact-enrich:${workspaceId}`, {
@@ -292,9 +299,9 @@ export const appRouter = router({
           });
         }
         try {
-          // Wrapped so "nothing published" is a value, not an exception: the UI
+          // Wrapped so "nothing found" is a value, not an exception: the UI
           // has to be able to say "no address found" honestly.
-          return { contact: await enrichProspectContact(workspaceId, input.prospectId) };
+          return { contact: await enrichProspectContact(workspaceId, input.prospectId, { paid: input.paid }) };
         } catch (err) {
           const message = err instanceof Error ? err.message : "could not search for a contact";
           throw new TRPCError({ code: "BAD_REQUEST", message });

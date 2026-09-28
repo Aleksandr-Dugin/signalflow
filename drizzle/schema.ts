@@ -247,8 +247,19 @@ export const contacts = mysqlTable(
     name: varchar("name", { length: 200 }).notNull().default(""),
     title: varchar("title", { length: 200 }),
     email: varchar("email", { length: 320 }),
+    // Non-email channels cannot be *sent* on yet (email is the only outbound
+    // channel; see docs/ai-agents.md), but a number or profile returned by an
+    // enrichment provider needs an honest home the day it arrives. Dropping it
+    // loses money already spent on the lookup; smuggling it into `email` or
+    // `sourceUrl` corrupts the funnel.
+    phone: varchar("phone", { length: 40 }),
+    socialUrl: varchar("social_url", { length: 1024 }),
     verified: boolean("verified").notNull().default(false),
     sourceUrl: varchar("source_url", { length: 1024 }),
+    // Where this contact came from: a page we scraped, a paid data provider, or a
+    // human. Required for the GDPR subject-access answer ("we hold this because
+    // X said so on Y") and for knowing which source to trust when they disagree.
+    origin: varchar("origin", { length: 32 }).notNull().default("manual"),
     createdAt: ts("created_at"),
   },
   (t) => ({
@@ -398,6 +409,13 @@ export const outreachMessages = mysqlTable(
       .notNull()
       .references(() => prospects.id, { onDelete: "cascade" }),
     recipientEmail: varchar("recipient_email", { length: 320 }).notNull(),
+    // Single-value enum on purpose. Email is the only channel that can actually
+    // be sent today, and the type must say so: a varchar would let code quietly
+    // claim a message was delivered over a channel that does not exist. Adding
+    // SMS/Telegram/WhatsApp is a deliberate widening here plus a real provider.
+    channel: mysqlEnum("channel", ["email"])
+      .notNull()
+      .default("email"),
     recipientName: varchar("recipient_name", { length: 200 }),
     subject: varchar("subject", { length: 500 }).notNull().default(""),
     body: text("body").notNull().default(""),

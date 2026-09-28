@@ -166,6 +166,39 @@ website produces a real, correctly-attributed address rather than nothing.
 - [ ] Check `MAX_CONTACT_ENRICHMENTS` in the logs: a run of 20 candidates must not
       scrape more than the configured number of companies.
 
+### 8. Paid enrichment (Hunter / Apollo)
+
+Nothing here is verifiable offline: the fixtures in `server/enrichment.test.ts` are
+transcribed from the providers' published API docs, and a provider can rename a
+field without telling anyone. So the first live call must be *compared*, not just
+observed to succeed.
+
+- [ ] With `ENRICHMENT_PROVIDER` unset and only a key in the environment, confirm no
+      lookup is bought: "Buy a lookup" must not appear, and `contact.enrich` must
+      refuse. A key present is not consent to spend.
+- [ ] First live call: log the raw response body and diff it against the field names
+      the mapping reads (`data.emails[]` for Hunter; `people[]` then `person` for
+      Apollo). Hunter's mapping is the less certain one — its docs site was not
+      reachable when this was written, so every field is read through an alias list.
+- [ ] Confirm the stored contact is a person at the company's own domain: never a
+      `@gmail.com`, never `info@`, never a `low`/`none` match, never a mailbox the
+      provider labelled `risky`/`invalid`/`catch_all`. Each is refused on purpose and
+      each refusal is unit-tested — but only a live call shows whether the provider
+      puts those values where we expect them.
+- [ ] Check `contacts.origin` is `provider` and the UI says "bought lookup" instead of
+      offering a "Published on this page" link for something no page printed.
+- [ ] Verify the stored `sourceUrl` contains no API key (Hunter authenticates in the
+      query string, and this column is rendered in the browser).
+- [ ] Confirm a phone number returned by the provider is displayed as "recorded only"
+      and that no code path attempts to send to it: `outreach_messages.channel` allows
+      exactly one value.
+- [ ] Trigger a provider failure (bad key, or disconnect) and confirm the click reports
+      "no data" while an unconfigured provider still reports the configuration error —
+      different sentences for different facts.
+- [ ] Watch the provider's credit meter for one lookup: it must not exceed
+      `ENRICHMENT_MAX_PEOPLE` records (Apollo bills per person, and its search results
+      carry obfuscated names and no address, so each address costs a second call).
+
 ## Known limitation: Stripe Payment Links join on email
 
 A Stripe Payment Link is one static URL, so it cannot carry per-contact metadata.

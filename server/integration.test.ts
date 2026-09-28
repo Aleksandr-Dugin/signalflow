@@ -24,7 +24,7 @@ import "./services/jobHandlers";
 import { makeIdempotencyKey, sendOutreachEmail } from "./services/outreach";
 import { ingestEmailEvent } from "./services/replies";
 import { handleCalendlyEvent, handleStripeEvent, applyStripeValue, recordCtaClick } from "./services/conversions";
-import { enrichProspectContact } from "./db";
+import { enrichProspectContact, listContacts, upsertManualContact } from "./db";
 
 const databaseConfigured = Boolean(process.env.DATABASE_URL);
 
@@ -453,6 +453,48 @@ suite("autonomous loop against a real database", () => {
       // which an operator would read as a result about the company.
       await expect(enrichProspectContact(workspaceId, prospectId)).rejects.toThrow(/SGAI_API_KEY/);
     }
+  });
+
+  // The paid leg is the only contact path that spends money, so the way it fails
+  // matters: "no provider configured" is an operator error to fix, while "no
+  // address found" would be silently believed as a fact about the prospect.
+  if (!env.enrichmentProvider) {
+    it("refuses to buy a lookup when no enrichment provider is configured", async () => {
+      await expect(enrichProspectContact(workspaceId, prospectId, { paid: true })).rejects.toThrow(
+        /ENRICHMENT_PROVIDER/,
+      );
+    });
+  }
+
+  // The columns added in 0002 are only real once something writes and reads them
+  // through actual SQL: this is that proof, and it is also the drift test for the
+  // migration (a database without them fails here, loudly, not in a job).
+  it("records where a contact came from, and keeps what a human typed", async () => {
+    const saved = await upsertManualContact(workspaceId, {
+      prospectId,
+      name: "Ada Lovelace",
+      title: "CTO",
+      email: `ada-${run}@acme-corp.example`,
+      phone: "+1 415 555 0158",
+    });
+    expect(saved.origin).toBe("manual");
+    expect(saved.phone).toBe("+1 415 555 0158");
+    expect(saved.socialUrl).toBeNull();
+    const listed = await listContacts(workspaceId, prospectId);
+    expect(listed.map((c) => c.id)).toContain(saved.id);
+
+    // And the send path states the channel it used instead of inheriting a
+    // default, so "email is the only channel" is a fact the row asserts.
+    const [sent] = await db!
+      .select({ channel: schema.outreachMessages.channel })
+      .from(schema.outreachMessages)
+      .where(eq(schema.outreachMessages.id, firstOutreachId))
+      .limit(1);
+    expect(sent?.channel).toBe("email");
+
+    // Hand the prospect back to the contact the rest of the loop is built around.
+    await db!.update(schema.prospects).set({ contactId }).where(eq(schema.prospects.id, prospectId));
+    await db!.delete(schema.contacts).where(eq(schema.contacts.id, saved.id));
   });
 
   // Kept last: it flips a global switch, so it must not overlap with any test

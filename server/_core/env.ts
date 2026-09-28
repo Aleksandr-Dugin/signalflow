@@ -58,6 +58,23 @@ export const env = {
   // 0 turns automatic contact discovery off; manual contacts still work.
   maxContactEnrichments: num("MAX_CONTACT_ENRICHMENTS", 10),
 
+  // Paid enrichment (docs/ai-agents.md: the only compliant route to phones and
+  // social profiles). Deliberately empty by default: the selector must name a
+  // provider, so having a key is never enough to start spending money. Setting
+  // this to `hunter` or `apollo` plus its key turns a manual lookup into an
+  // automated one; anything else keeps the pipeline on free page scraping.
+  enrichmentProvider: str("ENRICHMENT_PROVIDER"),
+  hunterApiKey: str("HUNTER_API_KEY"),
+  apolloApiKey: str("APOLLO_API_KEY"),
+  // Records looked up per prospect. Providers bill per person (Apollo 1-9
+  // credits each), so this is a spend cap.
+  enrichmentMaxPeople: num("ENRICHMENT_MAX_PEOPLE", 5),
+  // Off by default, and required *in addition to* ENRICHMENT_PROVIDER: unattended
+  // work may spend effort but must never spend money by surprise. Turning this on
+  // lets an autopilot discovery run buy contacts for the companies whose own pages
+  // named nobody, within MAX_CONTACT_ENRICHMENTS per run.
+  enrichmentAutoDiscover: bool("ENRICHMENT_AUTO_DISCOVER", false),
+
   // Outbound email
   smtpHost: str("SMTP_HOST"),
   smtpPort: num("SMTP_PORT", 587),

@@ -169,6 +169,17 @@ function titleCase(word: string): string {
 }
 
 /**
+ * A shared mailbox: somebody reads it, but no particular person does. Worth
+ * keeping as a last resort when it is all a company has printed on its own site;
+ * never worth paying an enrichment provider for, because the entire point of that
+ * call is a named human.
+ */
+export function isRoleMailbox(email: string): boolean {
+  const { local } = splitEmail(email);
+  return ROLE_LOCAL_PARTS.has(local.split("+")[0].replace(/\d+$/, ""));
+}
+
+/**
  * "jane.doe" / "m.petrova" / "jdoe" -> a display name, `null` when the local part
  * says nothing about a human ("hello", "support2", "1234").
  */

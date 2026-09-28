@@ -66,6 +66,33 @@ const REQUIRED: ColumnRequirement[] = [
     fix: "ALTER TABLE `prospects` MODIFY COLUMN `status` enum('new','qualified','disqualified','contacted','interested','not_interested','opportunity','suppressed','won','lost') NOT NULL DEFAULT 'new';",
   },
   {
+    // Contact provenance and non-email coordinates (0002). Enrichment writes
+    // these, so a database that predates the migration would fail inside a
+    // background job with "Unknown column" — the exact opaque symptom this guard
+    // exists to turn into a one-line fix at boot.
+    table: "contacts",
+    column: "origin",
+    fix: "ALTER TABLE `contacts` ADD COLUMN `origin` varchar(32) NOT NULL DEFAULT 'manual';",
+  },
+  {
+    table: "contacts",
+    column: "phone",
+    fix: "ALTER TABLE `contacts` ADD COLUMN `phone` varchar(40);",
+  },
+  {
+    table: "contacts",
+    column: "socialUrl",
+    fix: "ALTER TABLE `contacts` ADD COLUMN `social_url` varchar(1024);",
+  },
+  {
+    // The channel column is what makes "we only send email" a fact the database
+    // enforces rather than a comment in a doc.
+    table: "outreach_messages",
+    column: "channel",
+    enumContains: ["email"],
+    fix: "ALTER TABLE `outreach_messages` ADD COLUMN `channel` enum('email') NOT NULL DEFAULT 'email';",
+  },
+  {
     // The master autonomy switch. A missing table here is not a missing feature:
     // autonomyState() fails closed, so an un-migrated database runs with all
     // autonomy silently paused — loud reporting is the only way that is visible.

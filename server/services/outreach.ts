@@ -123,6 +123,10 @@ export async function sendOutreachEmail(
       recipientName: toName,
       subject: input.subject,
       body: trackedBody,
+      // Written explicitly rather than left to the column default: this row is a
+      // claim about which channel was used, and the enum only allows one value
+      // until a real second provider exists.
+      channel: "email",
       status: "sending",
       personalizationId: input.personalizationId ?? null,
       idempotencyKey: input.idempotencyKey,
