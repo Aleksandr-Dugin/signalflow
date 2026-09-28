@@ -246,8 +246,17 @@ export default function ProspectDetail({ id }: { id: string }) {
   });
 
   const outreach = trpc.prospect.outreach.useMutation({
-    onSuccess: () => {
-      toast.success("Outreach sent");
+    onSuccess: (res) => {
+      // Say which of these happened. A suppressed send and a send through the mock
+      // provider are recorded with the same "sent" status as a delivered one, so a
+      // single success toast here would claim an email nobody ever received.
+      if (res.status === "suppressed") {
+        toast.warning("Not sent - this address asked not to be contacted again.");
+      } else if (res.simulated) {
+        toast.warning("Not delivered - SMTP is not configured, so this send was simulated.");
+      } else {
+        toast.success("Outreach sent");
+      }
       void utils.prospect.detail.invalidate();
       void utils.opportunity.list.invalidate();
     },
@@ -371,15 +380,28 @@ export default function ProspectDetail({ id }: { id: string }) {
               <p className="text-sm text-muted-foreground">No messages yet. Personalize + send to start the thread.</p>
             ) : (
               <ol className="space-y-3">
-                {(thread.data ?? []).map((m, i) => (
-                  <li key={i} className={"rounded-lg border p-3 " + (m.direction === "inbound" ? "bg-muted/30" : "bg-card")}>
-                    <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
-                      <span>{m.direction === "inbound" ? "Prospect" : "You"} · {m.subject ?? "(no subject)"}</span>
-                      <span>{new Date(m.at).toLocaleString()}</span>
-                    </div>
-                    <div className="whitespace-pre-wrap text-sm">{(m.body ?? "").slice(0, 1500)}</div>
-                  </li>
-                ))}
+                {(thread.data ?? []).map((m, i) => {
+                  // A message that simply went out needs no label. Anything else -
+                  // blocked by the suppression list, rejected by the provider, or
+                  // never attempted because SMTP is not configured - is a fact about
+                  // what the loop did, and has to be readable in the history.
+                  const delivered = m.status === "sent" || m.status === "delivered" || m.status === "replied";
+                  const flagged = m.direction === "outbound" && !delivered;
+                  return (
+                    <li key={i} className={"rounded-lg border p-3 " + (m.direction === "inbound" ? "bg-muted/30" : "bg-card")}>
+                      <div className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
+                        <span>{m.direction === "inbound" ? "Prospect" : "You"} · {m.subject ?? "(no subject)"}</span>
+                        <span>{new Date(m.at).toLocaleString()}</span>
+                      </div>
+                      <div className="whitespace-pre-wrap text-sm">{(m.body ?? "").slice(0, 1500)}</div>
+                      {flagged && (
+                        <p className="mt-2 rounded-[3px] border border-amber-500/60 bg-amber-500/10 px-2 py-1 text-xs text-amber-500">
+                          Did not go out as a normal send - logged as {m.status ?? "unknown"}.
+                        </p>
+                      )}
+                    </li>
+                  );
+                })}
               </ol>
             )}
           </CardContent>

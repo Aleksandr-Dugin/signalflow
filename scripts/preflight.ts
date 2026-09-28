@@ -1,0 +1,328 @@
+// Launch preflight — one command that answers "can this deployment go live, and if
+// not, what exactly is missing". Run it with `pnpm preflight` (needs devDependencies,
+// i.e. run it from the source checkout, not from a slim production image).
+//
+// Why a script and not a test: every item below is a fact about the *outside* world —
+// DNS records, a live database, keys on this machine — which no test suite can assert
+// about a deployment it does not run. CI proves the logic; only this can prove the
+// configuration.
+//
+// Exit code: 1 if anything is FAIL. WARNs do not block, because the operator may know
+// something this script cannot (a pilot launch to five friendly prospects is a valid
+// reason to ship with enrichment unconfigured). Each line states its own consequence,
+// so the decision can be made from this output alone.
+//
+// The order of operations around this script is docs/launch.md.
+import { promises as dns } from "node:dns";
+import { env } from "../server/_core/env";
+import { detectSchemaDrift } from "../server/_core/schemaCheck";
+import { CONTROLLER, legalIsUnfiled } from "../shared/legal";
+
+type Grade = "ok" | "warn" | "fail";
+
+const results: { grade: Grade; area: string; line: string }[] = [];
+
+function record(grade: Grade, area: string, line: string): void {
+  results.push({ grade, area, line });
+}
+
+/** Email inside an SMTP_FROM display name, `"SignalFlow <a@b.com>"` -> `a@b.com`. */
+function addressFrom(sender: string): string | null {
+  const m = /<([^@\s>]+@[^@\s>]+)>/.exec(sender) ?? /^([^@\s>]+@[^@\s>]+)$/.exec(sender.trim());
+  return m?.[1]?.toLowerCase() ?? null;
+}
+
+function domainOf(address: string): string {
+  return address.split("@")[1] ?? "";
+}
+
+// DNS with a hard deadline, and three answers rather than two. "No such record" and
+// "the resolver could not be reached" look identical to a caller and mean opposite
+// things: one is a missing SPF record the operator has to add, the other is this script
+// failing to see. Collapsing them would have the checklist reassure a bad deployment.
+type Txt =
+  | { status: "found"; values: string[] }
+  | { status: "absent" }
+  | { status: "unreachable" };
+
+async function txt(name: string): Promise<Txt> {
+  try {
+    const rows = await Promise.race([
+      dns.resolveTxt(name),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("timeout")), 4000),
+      ),
+    ]);
+    // Each TXT record arrives as chunks that must be joined without separators.
+    return { status: "found", values: rows.map((chunks) => chunks.join("")) };
+  } catch (err) {
+    const code = (err as { code?: string }).code ?? "";
+    if (code === "ENOTFOUND" || code === "ENODATA" || code === "NOTFOUND" || code === "NOERROR") {
+      return { status: "absent" };
+    }
+    return { status: "unreachable" };
+  }
+}
+
+const DKIM_SELECTORS = [
+  // The selectors the providers this project is wired for actually publish. A real
+  // DKIM key can use another one, which is why a miss is a warning that names what to
+  // check rather than a claim that no key exists.
+  "default",
+  "s1", // Mailgun
+  "k1", // SendGrid
+  "selector1", // Microsoft 365
+  "google", // Google Workspace
+];
+
+async function checkDatabase(): Promise<void> {
+  if (!env.databaseUrl) {
+    record("fail", "database", "DATABASE_URL is unset — the server boots and stores nothing.");
+    return;
+  }
+  const masked = env.databaseUrl.replace(/\/\/[^@/]+@/, "//***@");
+  const drift = await detectSchemaDrift();
+  if (drift === null) {
+    record("warn", "database", `Could not read the schema at ${masked} — wrong host, credentials or TLS?`);
+    return;
+  }
+  if (drift.missing.length) {
+    for (const d of drift.missing.slice(0, 6)) {
+      record("fail", "database", `Table ${d.table} has no column ${d.column}. Fix: ${d.fix}`);
+    }
+  }
+  if (drift.unknownTables.length) {
+    record("warn", "database", `Tables the code does not know about: ${drift.unknownTables.join(", ")} (harmless, usually leftovers from an older schema).`);
+  }
+  if (!drift.missing.length) {
+    record("ok", "database", `Connected, and the live schema matches what the code assumes (${masked}).`);
+  }
+}
+
+async function checkSendingDomain(): Promise<void> {
+  if (!env.smtpHost) {
+    record("warn", "sending domain", "SMTP is not configured, so the sender's DNS cannot be judged yet. Once SMTP_* is set, this checks SPF, DKIM and DMARC on the From domain.");
+    return;
+  }
+  const address = addressFrom(env.smtpFrom);
+  if (!address) {
+    record("fail", "sending domain", `SMTP_FROM has no parsable address ("${env.smtpFrom}"). The unsubscribe header and DNS checks both need one.`);
+    return;
+  }
+  const domain = domainOf(address);
+  if (domain === "localhost" || !domain.includes(".")) {
+    record("fail", "sending domain", `SMTP_FROM uses the domain "${domain}", which cannot receive mail. Set SMTP_FROM to a domain you control.`);
+    return;
+  }
+  if (["gmail.com", "yahoo.com", "hotmail.com", "outlook.com"].includes(domain)) {
+    record("fail", "sending domain", `SMTP_FROM is at ${domain} — a free mailbox. Cold outreach from it will be filtered, and the account is likely to be limited mid-campaign.`);
+    return;
+  }
+
+  const spf = await txt(domain);
+  if (spf.status === "unreachable") {
+    record("warn", "sending domain", `Could not query DNS for ${domain} from this machine. Check SPF by hand: it must authorise your SMTP provider (e.g. "v=spf1 include:mailgun.org ~all").`);
+  } else if (spf.status === "absent" || !spf.values.some((t) => t.startsWith("v=spf1"))) {
+    record("fail", "sending domain", `No SPF record on ${domain}. Receiving servers will treat the campaign as forgery: expect spam folders and bounces.`);
+  } else {
+    record("ok", "sending domain", `SPF present on ${domain}: ${spf.values.find((t) => t.startsWith("v=spf1"))}`);
+  }
+
+  const dmarc = await txt(`_dmarc.${domain}`);
+  if (dmarc.status === "unreachable") {
+    record("warn", "sending domain", `Could not query _dmarc.${domain} — verify by hand that a DMARC record exists with a reporting address.`);
+  } else if (dmarc.status === "absent" || !dmarc.values.some((t) => t.startsWith("v=DMARC1"))) {
+    record("fail", "sending domain", `No DMARC record on _dmarc.${domain}. Gmail and Yahoo require it for bulk senders; without it a warmed-up domain is not usable.`);
+  } else {
+    record("ok", "sending domain", `DMARC present: ${dmarc.values.find((t) => t.startsWith("v=DMARC1"))}`);
+  }
+
+  const dkimHits: string[] = [];
+  let dkimUnreachable = false;
+  for (const selector of DKIM_SELECTORS) {
+    const value = await txt(`${selector}._domainkey.${domain}`);
+    if (value.status === "unreachable") dkimUnreachable = true;
+    else if (value.status === "found" && value.values.length) dkimHits.push(selector);
+  }
+  if (dkimHits.length) {
+    record("ok", "sending domain", `DKIM key published for selector(s): ${dkimHits.join(", ")}.`);
+  } else if (dkimUnreachable) {
+    record("warn", "sending domain", `Could not confirm DKIM on ${domain} (DNS queries failed from this machine). Sign the domain in your SMTP provider's dashboard and note the selector it uses.`);
+  } else {
+    record("warn", "sending domain", `No DKIM key found under the selectors this script knows (${DKIM_SELECTORS.join(", ")}). If your provider uses another selector, verify it by hand — an unsigned DKIM is the most common reason a warmed domain still lands in spam.`);
+  }
+}
+
+function checkConfig(): void {
+  if (!env.jwtSecret || env.jwtSecret.length < 32) {
+    record("fail", "auth", `JWT_SECRET is ${env.jwtSecret ? `only ${env.jwtSecret.length} characters` : "unset"} — sessions are forgeable.`);
+  } else if (env.jwtSecret.startsWith("change-me")) {
+    record("fail", "auth", "JWT_SECRET is still the example value from .env.example.");
+  } else {
+    record("ok", "auth", "JWT_SECRET is set to a long non-example value.");
+  }
+
+  if (!env.publicUrl.startsWith("https://") && env.isProd) {
+    record("fail", "urls", `PUBLIC_APP_URL is ${env.publicUrl} in production: unsubscribe links, CTA tracking and webhook URLs are all built from it, and http:// breaks the first one for every recipient.`);
+  } else if (!env.publicUrl.startsWith("http")) {
+    record("fail", "urls", `PUBLIC_APP_URL ("${env.publicUrl}") is not a URL — every generated link is broken.`);
+  } else if (env.publicUrl.includes("localhost")) {
+    record("warn", "urls", `PUBLIC_APP_URL is ${env.publicUrl}: fine for development, useless in a message a prospect reads. Set it to the deployed origin before the first send.`);
+  } else {
+    record("ok", "urls", `PUBLIC_APP_URL = ${env.publicUrl}.`);
+  }
+
+  if (env.isProd && !env.trustProxy) {
+    record("warn", "urls", "TRUST_PROXY is off in production: behind a proxy every request shares one IP, so auth / contact-search / reply-ingest rate limits collapse into a single bucket and start locking out real users.");
+  }
+
+  if (!env.adminEmails) {
+    record("warn", "auth", "ADMIN_EMAILS is unset — nobody can reach the Admin page, which means nobody can pull the platform autonomy kill switch or read the queue report from the UI.");
+  } else {
+    record("ok", "auth", `Admin access: ${env.adminEmails}`);
+  }
+}
+
+function checkPipeline(): void {
+  if (!env.groqApiKey) {
+    record("warn", "AI", "GROQ_API_KEY unset — drafts and reply classification fall back to mock text. Nothing here is sendable to a real prospect.");
+  } else {
+    record("ok", "AI", `GROQ_API_KEY set (model ${env.groqModel}).`);
+  }
+
+  if (!env.sgaiApiKey) {
+    record("warn", "discovery", "SGAI_API_KEY unset — discovery returns demo companies, not real leads.");
+  } else if (env.maxContactEnrichments <= 0) {
+    record("warn", "discovery", `SGAI_API_KEY set but MAX_CONTACT_ENRICHMENTS=${env.maxContactEnrichments}: companies are found, but nobody's address is extracted, so every prospect needs a manual contact.`);
+  } else {
+    record("ok", "discovery", `Live discovery with a second pass over /contact|/team|/about for up to ${env.maxContactEnrichments} companies per run.`);
+  }
+
+  if (!env.enrichmentProvider) {
+    record("ok", "enrichment", "No paid enrichment provider set — nothing is bought, and a stray API key alone cannot spend money by accident.");
+  } else {
+    // The key that matters depends on the selector: a Hunter key does nothing for
+    // ENRICHMENT_PROVIDER=apollo, and reporting "key present" would be a lie.
+    const key =
+      env.enrichmentProvider === "hunter"
+        ? env.hunterApiKey
+        : env.enrichmentProvider === "apollo"
+          ? env.apolloApiKey
+          : "";
+    const known = env.enrichmentProvider === "hunter" || env.enrichmentProvider === "apollo";
+    record(
+      known && key ? "ok" : "fail",
+      "enrichment",
+      `ENRICHMENT_PROVIDER=${env.enrichmentProvider}${!known ? " (not a provider this build knows: hunter or apollo)" : key ? " with a matching key" : " but its API key is missing — every lookup will fail"}; automatic spend is ${
+        env.enrichmentAutoDiscover
+          ? "ON (an unattended run may buy contacts, capped per run)"
+          : "off (only an explicit click buys)"
+      } at up to ${env.enrichmentMaxPeople} people per lookup.`,
+    );
+  }
+
+  if (!env.smtpHost || !env.smtpUser || !env.smtpPassword) {
+    record("fail", "outbound", "SMTP_HOST / SMTP_USER / SMTP_PASSWORD incomplete — outreach cannot be delivered. Everything upstream of it (discovery, scoring, replies) is untestable without this.");
+  } else {
+    record("ok", "outbound", `SMTP configured for ${env.smtpHost}:${env.smtpPort}${env.smtpSecure ? " (TLS)" : " (STARTTLS)"}.`);
+    if (!env.smtpReplyTo) {
+      record("warn", "outbound", "SMTP_REPLY_TO unset: replies have nowhere obvious to go and the List-Unsubscribe header loses its mailto leg. Set it to a monitored mailbox.");
+    }
+    if (!env.senderPostalAddress) {
+      record("warn", "outbound", "SENDER_POSTAL_ADDRESS unset — every message goes out without the physical address CAN-SPAM and equivalents require. The footer prints it only when it is real.");
+    }
+  }
+
+  if (!env.replyIngestSecret) {
+    record("fail", "inbound", "REPLY_INGEST_SECRET unset — every inbound webhook answers 503 (fail closed). Replies arrive nowhere, the funnel stops at 'sent', and no follow-up is ever queued.");
+  } else if (env.replyIngestSecret.length < 24) {
+    record("warn", "inbound", `REPLY_INGEST_SECRET is only ${env.replyIngestSecret.length} characters. It signs inbound mail from your provider; generate a long random one.`);
+  } else {
+    record("ok", "inbound", "REPLY_INGEST_SECRET set.");
+  }
+}
+
+function checkConversions(): void {
+  if (!env.calendlyUrl && !env.stripePaymentLink) {
+    record("warn", "conversions", "No CALENDLY_URL and no STRIPE_PAYMENT_LINK: AI follow-ups have no CTA to embed, so the loop can get a reply and nothing else.");
+  }
+  const booking = env.calendlyUrl && !env.calendlySigningSecret;
+  const payment = env.stripePaymentLink && !env.stripeWebhookSecret;
+  if (booking) {
+    record("fail", "conversions", "CALENDLY_URL set without CALENDLY_SIGNING_SECRET — /api/conversions/calendly refuses everything (503), so meeting_booked will never arrive and the funnel stalls at 'responded'.");
+  }
+  if (payment) {
+    record("fail", "conversions", "STRIPE_PAYMENT_LINK set without STRIPE_WEBHOOK_SECRET — /api/conversions/stripe refuses everything, so 'won' will never arrive.");
+  }
+  if (env.calendlyUrl && env.calendlySigningSecret) {
+    record("ok", "conversions", `Calendly ready: point the event webhook at ${env.publicUrl.replace(/\/$/, "")}/api/conversions/calendly`);
+  }
+  if (env.stripePaymentLink && env.stripeWebhookSecret) {
+    record("ok", "conversions", `Stripe ready: point the Payment Link webhook at ${env.publicUrl.replace(/\/$/, "")}/api/conversions/stripe`);
+  }
+  record(
+    env.discoveryIntervalHours > 0 ? "ok" : "warn",
+    "conversions",
+    env.discoveryIntervalHours > 0
+      ? `Recurring discovery every ${env.discoveryIntervalHours}h.`
+      : "DISCOVERY_INTERVAL_HOURS=0 — nothing re-runs on its own; every discovery pass is a manual click.",
+  );
+}
+
+function checkLegal(): void {
+  if (legalIsUnfiled()) {
+    const placeholders = Object.entries(CONTROLLER)
+      .filter(([, v]) => v.startsWith("TODO:"))
+      .map(([k]) => k)
+      .join(", ");
+    record("warn", "legal", `/privacy and /terms render as drafts (banner on the page) until CONTROLLER in shared/legal.ts is filled in: ${placeholders}. A policy that names no controller is not a policy.`);
+  } else {
+    record("ok", "legal", "Controller fields are filled in. Have the text reviewed for the jurisdictions you send to.");
+  }
+}
+
+async function main(): Promise<void> {
+  checkConfig();
+  await checkDatabase();
+  await checkSendingDomain();
+  checkPipeline();
+  checkConversions();
+  checkLegal();
+
+  // Grouped in launch order rather than alphabetically: the operator reads this top to
+  // bottom and fixes it top to bottom, so "database" must not arrive after "auth".
+  const areas = ["urls", "auth", "database", "sending domain", "outbound", "inbound", "AI", "discovery", "enrichment", "conversions", "legal"];
+  const order: Record<Grade, number> = { fail: 0, warn: 1, ok: 2 };
+  const sorted = results.slice().sort(
+    (a, b) =>
+      areas.indexOf(a.area) - areas.indexOf(b.area) ||
+      order[a.grade] - order[b.grade] ||
+      a.line.localeCompare(b.line),
+  );
+  let lastArea = "";
+  for (const r of sorted) {
+    if (r.area !== lastArea) {
+      console.log(`\n${r.area}`);
+      lastArea = r.area;
+    }
+    console.log(`  [${r.grade.toUpperCase().padEnd(4)}] ${r.line}`);
+  }
+
+  const fails = results.filter((r) => r.grade === "fail").length;
+  const warns = results.filter((r) => r.grade === "warn").length;
+  console.log(
+    `\n${fails ? `${fails} blocking item(s)` : "no blocking items"}, ${warns} warning(s). ` +
+      `Environment: ${env.nodeEnv}, ${env.isProd ? "production" : "not production"} (NODE_ENV).`,
+  );
+  console.log(
+    "Not checkable from here — verify by hand (docs/verification.md): an actual inbox test, " +
+      "the provider webhook routes registered at the deployed URLs, and one full live run of " +
+      "discovery -> contact -> send -> reply -> follow-up -> booking -> won.",
+  );
+  process.exit(fails ? 1 : 0);
+}
+
+main().catch((err) => {
+  console.error("preflight crashed:", err);
+  process.exit(1);
+});

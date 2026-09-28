@@ -1,4 +1,4 @@
-import { and, count, desc, eq, inArray } from "drizzle-orm";
+import { and, count, desc, eq, inArray, notInArray } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import { promises as dns, type MxRecord } from "node:dns";
 import { nanoid } from "nanoid";
@@ -1043,27 +1043,80 @@ function appendTools<T extends { cta: string; body: string }>(
 
 // Return the last N messages of a prospect thread so the AI writer has real
 // conversational memory (SalesGPT/B2B-SDR-agent pattern).
+export type ThreadMessage = {
+  direction: "inbound" | "outbound";
+  subject: string | null;
+  body: string | null;
+  at: Date;
+  /**
+   * Outcome of a message we sent (`sent`, `suppressed`, `failed`…), null for
+   * anything we received. The thread is the record of what the automation did to
+   * a person, so "sent" that was really a mock-provider simulation or a blocked
+   * send has to stay visible instead of collapsing into one identical bubble.
+   */
+  status: string | null;
+};
+
 export async function getProspectThread(
   workspaceId: string,
   prospectId: string,
   limit = 10,
-): Promise<{ direction: "inbound" | "outbound"; subject: string | null; body: string | null; at: Date }[]> {
+): Promise<ThreadMessage[]> {
   const db = getDb();
   if (!db) return [];
-  const rows = await db
-    .select()
-    .from(schema.emailEvents)
-    .where(and(eq(schema.emailEvents.workspaceId, workspaceId), eq(schema.emailEvents.prospectId, prospectId)))
-    .orderBy(desc(schema.emailEvents.createdAt))
-    .limit(limit);
-  return rows
-    .reverse()
-    .map((r) => ({
+  // The conversation lives in two tables: what we mailed is in outreach_messages,
+  // what came back is in email_events. Reading only the second one produced a
+  // thread that showed a prospect's reply but not the message they were replying
+  // to, so nobody could see what the autopilot had actually sent.
+  const [eventRows, sentRows] = await Promise.all([
+    db
+      .select()
+      .from(schema.emailEvents)
+      .where(and(eq(schema.emailEvents.workspaceId, workspaceId), eq(schema.emailEvents.prospectId, prospectId)))
+      .orderBy(desc(schema.emailEvents.createdAt))
+      .limit(limit),
+    db
+      .select({
+        subject: schema.outreachMessages.subject,
+        body: schema.outreachMessages.body,
+        status: schema.outreachMessages.status,
+        error: schema.outreachMessages.error,
+        at: schema.outreachMessages.sentAt,
+        queuedAt: schema.outreachMessages.createdAt,
+      })
+      .from(schema.outreachMessages)
+      .where(
+        and(
+          eq(schema.outreachMessages.workspaceId, workspaceId),
+          eq(schema.outreachMessages.prospectId, prospectId),
+          // Everything except an untouched draft counts: a send that was
+          // suppressed or failed is still something the operator must be able
+          // to see in the history.
+          notInArray(schema.outreachMessages.status, ["draft"]),
+        ),
+      )
+      .orderBy(desc(schema.outreachMessages.createdAt))
+      .limit(limit),
+  ]);
+  const rows: ThreadMessage[] = [
+    ...eventRows.map((r) => ({
       direction: r.direction,
       subject: r.subject ?? null,
       body: r.bodyText ?? null,
       at: r.createdAt ?? new Date(),
-    }));
+      status: null,
+    })),
+    ...sentRows.map((r) => ({
+      direction: "outbound" as const,
+      subject: r.subject ?? null,
+      body: r.body ?? null,
+      at: r.at ?? r.queuedAt ?? new Date(),
+      // The provider's own note is what distinguishes a real delivery from a
+      // simulation, and it only exists on the row - pass it through verbatim.
+      status: r.error ? `${r.status}: ${r.error}` : r.status,
+    })),
+  ];
+  return rows.sort((a, b) => a.at.getTime() - b.at.getTime()).slice(-limit);
 }
 
 async function prospectCompanyId(db: NonNullable<ReturnType<typeof getDb>>, prospectId: string): Promise<string> {

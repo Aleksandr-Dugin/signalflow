@@ -5,6 +5,10 @@ container has no mailbox, no Calendly account and no Stripe live mode. **Nothing
 the "must verify live" list below has ever been executed for this project.** Until it
 has, do not enable per-workspace autopilot against real prospects.
 
+This page is the checklist; [launch.md](./launch.md) is the runbook that puts these items
+in the order they can actually be done, and `pnpm preflight` automates every
+configuration reading of steps 1–4.
+
 What CI already covers (`.github/workflows/ci.yml`):
 
 - `pnpm check` — TypeScript over server, client and shared code.
@@ -80,6 +84,13 @@ date and the outcome in the PR that enables autopilot.
       subsequent send to that address returns `status: "suppressed"` without mailing.
 - [ ] POST to the same URL with body `List-Unsubscribe=One-Click` → `200 Unsubscribed.`
       (the one-click path mail clients use without asking the user).
+- [ ] Open the prospect afterwards: the Conversation must contain **the message that was
+      sent**, not only what came back. `outreach_messages` and `email_events` are joined
+      in `getProspectThread()`; a thread that hides the outbound half is how a sender that
+      delivers nothing passes for a working one.
+- [ ] With SMTP deliberately unset, send once: the message must be recorded, the provider
+      note must say it was simulated, and both the toast and the thread entry must refuse
+      to call it delivered.
 
 ### 3. Inbound loop
 
@@ -111,6 +122,9 @@ date and the outcome in the PR that enables autopilot.
       good, let's talk" and wait past the 60-second debounce.
 - [ ] `job_runs` shows the `reply.followup` row go `queued` → `completed`, and a
       second `outreach_messages` row appears for the prospect.
+- [ ] Read that follow-up: it has to answer what was actually said. The writer's history
+      now includes our own outbound messages, so a follow-up that ignores the first email
+      or repeats it verbatim means the memory join broke.
 - [ ] The opportunity stage stays `responded` after that follow-up. If it moved to
       `meeting_booked`, the cosmetic-advancement bug is back — that is a blocker.
 - [ ] Kill the server mid-job and restart; the stuck `running` row is reclaimed after

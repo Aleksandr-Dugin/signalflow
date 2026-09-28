@@ -24,7 +24,8 @@ import "./services/jobHandlers";
 import { makeIdempotencyKey, sendOutreachEmail } from "./services/outreach";
 import { ingestEmailEvent } from "./services/replies";
 import { handleCalendlyEvent, handleStripeEvent, applyStripeValue, recordCtaClick } from "./services/conversions";
-import { enrichProspectContact, listContacts, upsertManualContact } from "./db";
+import { enrichProspectContact, getProspectThread, listContacts, upsertManualContact } from "./db";
+import { smtpConfigured } from "./services/email";
 import { addressWasForgotten, eraseSubjectData, exportSubjectData } from "./services/gdpr";
 
 const databaseConfigured = Boolean(process.env.DATABASE_URL);
@@ -285,6 +286,33 @@ suite("autonomous loop against a real database", () => {
       .where(eq(schema.opportunities.prospectId, prospectId))
       .limit(1);
     expect(opp!.stage).toBe("responded");
+  });
+
+  it("shows both halves of the conversation, with the outcome of ours", async () => {
+    // The thread used to read email_events alone, so the mail we sent never appeared:
+    // an operator could not see what the autopilot had written to a person, and the
+    // follow-up writer had no memory of its own previous messages.
+    const thread = await getProspectThread(workspaceId, prospectId, 50);
+    const outbound = thread.filter((m) => m.direction === "outbound");
+    const inbound = thread.filter((m) => m.direction === "inbound");
+    expect(outbound.length).toBeGreaterThanOrEqual(2); // the invite and the AI follow-up
+    expect(inbound.length).toBeGreaterThanOrEqual(1); // the reply that triggered it
+
+    // Chronological: a history printed out of order is a history nobody can read.
+    const times = thread.map((m) => m.at.getTime());
+    expect(times).toEqual([...times].sort((a, b) => a - b));
+
+    // Every message we sent says what became of it; messages we received have no
+    // outcome of ours to report.
+    for (const m of outbound) expect(m.status).toMatch(/^(sent|delivered|replied|failed|suppressed|cancelled|queued|sending|approved)(: .*)?$/);
+    for (const m of inbound) expect(m.status).toBeNull();
+
+    // The case this really protects: with no SMTP configured the send is a
+    // simulation, and "sent" printed over it would be a claim about an email that
+    // never left the machine.
+    if (!smtpConfigured()) {
+      expect(outbound[0]!.status).toContain("simulated");
+    }
   });
 
   it("walks the funnel on real external evidence only", async () => {

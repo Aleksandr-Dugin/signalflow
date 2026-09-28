@@ -67,7 +67,9 @@ inbound email (ESP webhook)
           enqueueJob("reply.followup", runAfter: now + 60s)
   -> job worker claims atomically   server/services/jobs.ts
   -> reply.followup handler         server/services/jobHandlers.ts
-     -> getProspectThread()         multi-turn memory from email_events
+     -> getProspectThread()         multi-turn memory: outreach_messages (what we
+                                    sent, with its outcome) + email_events (what
+                                    came back, incl. funnel evidence)
      -> generatePersonalization()   objection-aware draft
      -> sendOutreachEmail()         same idempotent pipeline a human uses
 ```
